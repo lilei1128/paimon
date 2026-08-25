@@ -24,6 +24,7 @@ import org.apache.paimon.spark.PaimonSparkTestBase
 import org.apache.paimon.table.FileStoreTable
 import org.apache.paimon.table.source.OutOfRangeException
 
+import org.apache.spark.sql.Row
 import org.apache.spark.sql.connector.read.streaming.ReadLimit
 
 import java.util.{Collections, HashMap}
@@ -52,6 +53,79 @@ class PaimonMicroBatchStreamITCase extends PaimonSparkTestBase {
 
     assert(latest.totalSplits.isEmpty)
     assert(!latest.json().contains("totalSplits"))
+  }
+
+  test("advance past an empty initial full snapshot without a consumer") {
+    val sourceTable = createTableWithOneSnapshot()
+    spark.sql("INSERT OVERWRITE T SELECT * FROM T WHERE false")
+
+    val stream = createStream(sourceTable)
+    val initial = stream.initialOffset().asInstanceOf[PaimonSourceOffset]
+    val emptySnapshotId = sourceTable.snapshotManager().latestSnapshotId()
+    assert(initial.snapshotId == emptySnapshotId)
+    assert(initial.scanSnapshot)
+
+    stream.lastTriggerMillis = System.currentTimeMillis()
+    val emptyEnd = latestOffset(stream, initial, ReadLimit.minRows(100L, 60000L))
+    assert(emptyEnd.snapshotId == emptySnapshotId + 1L)
+    assert(emptyEnd.index == PaimonSourceOffset.INIT_OFFSET_INDEX)
+    assert(!emptyEnd.scanSnapshot)
+
+    spark.sql("INSERT INTO T VALUES (20, 'v_20')")
+    val nextEnd = latestOffset(stream, emptyEnd, ReadLimit.allAvailable())
+
+    assert(nextEnd.snapshotId == emptyEnd.snapshotId)
+    assert(!nextEnd.scanSnapshot)
+    assert(stream.planInputPartitions(emptyEnd, nextEnd).nonEmpty)
+  }
+
+  test("advance consumer past an empty initial full snapshot") {
+    val sourceTable = createTableWithOneSnapshot()
+    spark.sql("INSERT OVERWRITE T SELECT * FROM T WHERE false")
+    val sourceTableWithConsumer = withConsumer(sourceTable)
+
+    val stream = createStream(sourceTableWithConsumer)
+    val initial = stream.initialOffset().asInstanceOf[PaimonSourceOffset]
+    val emptySnapshotId = sourceTable.snapshotManager().latestSnapshotId()
+    val emptyEnd = latestOffset(stream, initial, ReadLimit.allAvailable())
+
+    assert(emptyEnd.snapshotId == emptySnapshotId + 1L)
+    assert(emptyEnd.index == PaimonSourceOffset.INIT_OFFSET_INDEX)
+    assert(!emptyEnd.scanSnapshot)
+    assert(emptyEnd.emptySnapshotCompleted)
+
+    stream.commit(emptyEnd)
+    assert(consumerNextSnapshot(sourceTableWithConsumer) == emptySnapshotId + 1L)
+  }
+
+  test("do not advance an empty full snapshot past a delta deferred by ReadMinRows") {
+    val sourceTable = createTableWithOneSnapshot()
+    spark.sql("INSERT OVERWRITE T SELECT * FROM T WHERE false")
+    val stream = createStream(sourceTable)
+    val initial = stream.initialOffset().asInstanceOf[PaimonSourceOffset]
+    spark.sql("INSERT INTO T VALUES (20, 'v_20')")
+    stream.lastTriggerMillis = System.currentTimeMillis()
+
+    val deferred = stream.latestOffset(initial, ReadLimit.minRows(100L, 60000L))
+
+    assert(deferred == null)
+  }
+
+  test("resume an empty full snapshot after ReadMinRows delay") {
+    val sourceTable = createTableWithOneSnapshot()
+    spark.sql("INSERT OVERWRITE T SELECT * FROM T WHERE false")
+    val stream = createStream(sourceTable)
+    val initial = stream.initialOffset().asInstanceOf[PaimonSourceOffset]
+    spark.sql("INSERT INTO T VALUES (20, 'v_20')")
+
+    stream.lastTriggerMillis = System.currentTimeMillis()
+    assert(stream.latestOffset(initial, ReadLimit.minRows(100L, 60000L)) == null)
+
+    stream.lastTriggerMillis = System.currentTimeMillis() - 60001L
+    val resumed = latestOffset(stream, initial, ReadLimit.minRows(100L, 60000L))
+    assert(resumed.snapshotId == sourceTable.snapshotManager().latestSnapshotId())
+    assert(!resumed.scanSnapshot)
+    assert(stream.planInputPartitions(initial, resumed).nonEmpty)
   }
 
   test("create consumer only after the initial full snapshot is completely consumed") {
@@ -285,6 +359,61 @@ class PaimonMicroBatchStreamITCase extends PaimonSparkTestBase {
           assert(consumer.get().nextSnapshot() >= 2L)
         } finally {
           query.stop()
+        }
+    }
+  }
+
+  test("Spark query restarts after an empty initial full snapshot with a consumer") {
+    withTempDir {
+      checkpointDir =>
+        val sourceTable = createTableWithOneSnapshot()
+        spark.sql("INSERT OVERWRITE T SELECT * FROM T WHERE false")
+        val location = sourceTable.location().toString
+        val emptySnapshotId = sourceTable.snapshotManager().latestSnapshotId()
+
+        val firstQuery = spark.readStream
+          .format("paimon")
+          .option(CoreOptions.CONSUMER_ID.key(), consumerId)
+          .load(location)
+          .writeStream
+          .format("memory")
+          .option("checkpointLocation", checkpointDir.getCanonicalPath)
+          .queryName("spark_empty_consumer_before_restart")
+          .outputMode("append")
+          .start()
+
+        try {
+          firstQuery.processAllAvailable()
+          checkAnswer(spark.sql("SELECT * FROM spark_empty_consumer_before_restart"), Seq.empty)
+          val endOffset = PaimonSourceOffset(firstQuery.lastProgress.sources(0).endOffset)
+          assert(endOffset.snapshotId == emptySnapshotId + 1L)
+          assert(endOffset.index == PaimonSourceOffset.INIT_OFFSET_INDEX)
+          assert(!endOffset.scanSnapshot)
+          assert(endOffset.emptySnapshotCompleted)
+        } finally {
+          firstQuery.stop()
+        }
+
+        spark.sql("INSERT INTO T VALUES (20, 'v_20')")
+
+        val restartedQuery = spark.readStream
+          .format("paimon")
+          .option(CoreOptions.CONSUMER_ID.key(), consumerId)
+          .load(location)
+          .writeStream
+          .format("memory")
+          .option("checkpointLocation", checkpointDir.getCanonicalPath)
+          .queryName("spark_empty_consumer_after_restart")
+          .outputMode("append")
+          .start()
+
+        try {
+          restartedQuery.processAllAvailable()
+          checkAnswer(
+            spark.sql("SELECT * FROM spark_empty_consumer_after_restart"),
+            Seq(Row(20, "v_20")))
+        } finally {
+          restartedQuery.stop()
         }
     }
   }

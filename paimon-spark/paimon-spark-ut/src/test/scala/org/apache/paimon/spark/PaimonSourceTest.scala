@@ -537,6 +537,98 @@ class PaimonSourceTest extends PaimonSparkTestBase with StreamTest {
     }
   }
 
+  test("Paimon Source: advance past an empty initial full snapshot") {
+    withTempDir {
+      checkpointDir =>
+        spark.sql("""
+                    |CREATE TABLE T (a INT, b STRING)
+                    |TBLPROPERTIES ('primary-key'='a', 'bucket'='2', 'file.format'='parquet')
+                    |""".stripMargin)
+        val location = loadTable("T").location().toString
+        spark.sql("INSERT INTO T VALUES (1, 'before')")
+        spark.sql("INSERT OVERWRITE T SELECT * FROM T WHERE false")
+
+        val query = spark.readStream
+          .format("paimon")
+          .load(location)
+          .writeStream
+          .format("memory")
+          .option("checkpointLocation", checkpointDir.getCanonicalPath)
+          .queryName("empty_full_snapshot")
+          .outputMode("append")
+          .start()
+
+        try {
+          query.processAllAvailable()
+          checkAnswer(spark.sql("SELECT * FROM empty_full_snapshot"), Seq.empty)
+
+          spark.sql("INSERT INTO T VALUES (2, 'after')")
+          query.processAllAvailable()
+          checkAnswer(spark.sql("SELECT * FROM empty_full_snapshot"), Seq(Row(2, "after")))
+        } finally {
+          query.stop()
+        }
+    }
+  }
+
+  test("Paimon Source: resume past an empty initial full snapshot after restart") {
+    withTempDir {
+      checkpointDir =>
+        spark.sql("DROP TABLE IF EXISTS T")
+        spark.sql("""
+                    |CREATE TABLE T (a INT, b STRING)
+                    |TBLPROPERTIES ('primary-key'='a', 'bucket'='2', 'file.format'='parquet')
+                    |""".stripMargin)
+        val location = loadTable("T").location().toString
+        spark.sql("INSERT INTO T VALUES (1, 'before')")
+        spark.sql("INSERT OVERWRITE T SELECT * FROM T WHERE false")
+
+        val firstQuery = spark.readStream
+          .format("paimon")
+          .load(location)
+          .writeStream
+          .format("memory")
+          .option("checkpointLocation", checkpointDir.getCanonicalPath)
+          .queryName("empty_full_snapshot_restart_before")
+          .outputMode("append")
+          .start()
+
+        val emptySnapshotId = loadTable("T").snapshotManager().latestSnapshotId()
+        try {
+          firstQuery.processAllAvailable()
+          checkAnswer(spark.sql("SELECT * FROM empty_full_snapshot_restart_before"), Seq.empty)
+          val endOffset = PaimonSourceOffset(firstQuery.lastProgress.sources(0).endOffset)
+          assert(endOffset.snapshotId == emptySnapshotId + 1L)
+          assert(endOffset.index == PaimonSourceOffset.INIT_OFFSET_INDEX)
+          assert(!endOffset.scanSnapshot)
+          assert(endOffset.totalSplits.isEmpty)
+        } finally {
+          firstQuery.stop()
+        }
+
+        spark.sql("INSERT INTO T VALUES (2, 'after')")
+
+        val restartedQuery = spark.readStream
+          .format("paimon")
+          .load(location)
+          .writeStream
+          .format("memory")
+          .option("checkpointLocation", checkpointDir.getCanonicalPath)
+          .queryName("empty_full_snapshot_restart_after")
+          .outputMode("append")
+          .start()
+
+        try {
+          restartedQuery.processAllAvailable()
+          checkAnswer(
+            spark.sql("SELECT * FROM empty_full_snapshot_restart_after"),
+            Seq(Row(2, "after")))
+        } finally {
+          restartedQuery.stop()
+        }
+    }
+  }
+
   test("Paimon Source: from-snapshot and from-snapshot-full scan mode") {
     withTempDirs {
       (checkpointDir1, checkpointDir2) =>
