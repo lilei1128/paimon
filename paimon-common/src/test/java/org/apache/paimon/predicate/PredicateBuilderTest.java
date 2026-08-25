@@ -18,9 +18,11 @@
 
 package org.apache.paimon.predicate;
 
+import org.apache.paimon.data.GenericArray;
 import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.format.SimpleColStats;
 import org.apache.paimon.types.DataType;
+import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.DateType;
 import org.apache.paimon.types.DecimalType;
 import org.apache.paimon.types.IntType;
@@ -39,9 +41,13 @@ import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import static org.apache.paimon.predicate.SimpleColStatsTestUtils.test;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Tests for {@link PredicateBuilder}. */
 public class PredicateBuilderTest {
@@ -112,13 +118,99 @@ public class PredicateBuilderTest {
         Predicate child3 = builder.isNull(6);
 
         assertThat(PredicateBuilder.splitAnd(PredicateBuilder.and(child1, child2, child3)))
-                .isEqualTo(
-                        Arrays.asList(
-                                child1,
-                                child3,
-                                builder.isNull(5),
-                                builder.isNull(4),
-                                builder.isNull(3)));
+                .containsExactlyInAnyOrder(
+                        child1, child3, builder.isNull(5), builder.isNull(4), builder.isNull(3));
+    }
+
+    // ---- and() tests ----
+
+    @Test
+    public void testAndFiltersTruePredicates() {
+        PredicateBuilder builder = new PredicateBuilder(RowType.of(new IntType()));
+        Predicate a = builder.equal(0, 1);
+
+        // and(a, alwaysTrue()) should simplify to a
+        assertThat(PredicateBuilder.and(a, PredicateBuilder.alwaysTrue())).isEqualTo(a);
+        // and(alwaysTrue(), a) should simplify to a
+        assertThat(PredicateBuilder.and(PredicateBuilder.alwaysTrue(), a)).isEqualTo(a);
+    }
+
+    @Test
+    public void testAndShortCircuitsFalse() {
+        PredicateBuilder builder = new PredicateBuilder(RowType.of(new IntType()));
+        Predicate a = builder.equal(0, 1);
+
+        // Any always-false child makes the whole AND always-false
+        Predicate result = PredicateBuilder.and(a, PredicateBuilder.alwaysFalse());
+        assertThat(result).isEqualTo(PredicateBuilder.alwaysFalse());
+
+        result = PredicateBuilder.and(PredicateBuilder.alwaysFalse(), a);
+        assertThat(result).isEqualTo(PredicateBuilder.alwaysFalse());
+    }
+
+    @Test
+    public void testAndAllTrue() {
+        // and(alwaysTrue(), alwaysTrue()) → alwaysTrue()
+        Predicate result =
+                PredicateBuilder.and(PredicateBuilder.alwaysTrue(), PredicateBuilder.alwaysTrue());
+        assertThat(result).isEqualTo(PredicateBuilder.alwaysTrue());
+    }
+
+    // ---- or() tests ----
+
+    @Test
+    public void testOrFiltersFalsePredicates() {
+        PredicateBuilder builder = new PredicateBuilder(RowType.of(new IntType()));
+        Predicate a = builder.equal(0, 1);
+
+        // or(a, alwaysFalse()) should simplify to a
+        assertThat(PredicateBuilder.or(a, PredicateBuilder.alwaysFalse())).isEqualTo(a);
+        // or(alwaysFalse(), a) should simplify to a
+        assertThat(PredicateBuilder.or(PredicateBuilder.alwaysFalse(), a)).isEqualTo(a);
+    }
+
+    @Test
+    public void testOrShortCircuitsTrue() {
+        PredicateBuilder builder = new PredicateBuilder(RowType.of(new IntType()));
+        Predicate a = builder.equal(0, 1);
+
+        // Any always-true child makes the whole OR always-true
+        Predicate result = PredicateBuilder.or(a, PredicateBuilder.alwaysTrue());
+        assertThat(result).isEqualTo(PredicateBuilder.alwaysTrue());
+
+        result = PredicateBuilder.or(PredicateBuilder.alwaysTrue(), a);
+        assertThat(result).isEqualTo(PredicateBuilder.alwaysTrue());
+    }
+
+    @Test
+    public void testOrAllFalse() {
+        // or(alwaysFalse(), alwaysFalse()) → alwaysFalse()
+        Predicate result =
+                PredicateBuilder.or(PredicateBuilder.alwaysFalse(), PredicateBuilder.alwaysFalse());
+        assertThat(result).isEqualTo(PredicateBuilder.alwaysFalse());
+    }
+
+    // ---- and/or evaluation tests ----
+
+    @Test
+    public void testAndEvaluation() {
+        PredicateBuilder builder = new PredicateBuilder(RowType.of(new IntType()));
+        // a >= 1 AND a <= 3  (optimised to BETWEEN(1, 3))
+        Predicate result =
+                PredicateBuilder.and(builder.greaterOrEqual(0, 1), builder.lessOrEqual(0, 3));
+        assertThat(result.test(GenericRow.of(2))).isTrue();
+        assertThat(result.test(GenericRow.of(0))).isFalse();
+        assertThat(result.test(GenericRow.of(4))).isFalse();
+    }
+
+    @Test
+    public void testOrEvaluation() {
+        PredicateBuilder builder = new PredicateBuilder(RowType.of(new IntType()));
+        // a = 1 OR a = 2
+        Predicate result = PredicateBuilder.or(builder.equal(0, 1), builder.equal(0, 2));
+        assertThat(result.test(GenericRow.of(1))).isTrue();
+        assertThat(result.test(GenericRow.of(2))).isTrue();
+        assertThat(result.test(GenericRow.of(3))).isFalse();
     }
 
     @Test
@@ -129,6 +221,166 @@ public class PredicateBuilderTest {
         predicate = builder.in(0, Arrays.asList(1, 2));
         assertThat(predicate.test(GenericRow.of(1))).isEqualTo(true);
         assertThat(predicate.test(GenericRow.of(10))).isEqualTo(false);
+    }
+
+    @Test
+    public void testArrayContains() {
+        PredicateBuilder builder =
+                new PredicateBuilder(RowType.of(DataTypes.ARRAY(DataTypes.INT())));
+        Predicate containsTwo = builder.arrayContains(0, 2);
+        Predicate transformedContainsTwo =
+                builder.arrayContains(
+                        new FieldTransform(new FieldRef(0, "f0", DataTypes.ARRAY(DataTypes.INT()))),
+                        2);
+
+        assertThat(containsTwo.test(GenericRow.of(new GenericArray(new Integer[] {1, null, 2, 2}))))
+                .isTrue();
+        assertThat(
+                        transformedContainsTwo.test(
+                                GenericRow.of(new GenericArray(new Integer[] {1, 2}))))
+                .isTrue();
+        assertThat(containsTwo.test(GenericRow.of(new GenericArray(new Integer[] {1, 3}))))
+                .isFalse();
+        assertThat(containsTwo.test(GenericRow.of(new GenericArray(new Integer[0])))).isFalse();
+        assertThat(containsTwo.test(GenericRow.of((Object) null))).isFalse();
+        assertThat(
+                        builder.arrayContains(0, null)
+                                .test(GenericRow.of(new GenericArray(new Integer[] {1, null}))))
+                .isFalse();
+        DataType arrayType = DataTypes.ARRAY(DataTypes.INT());
+        assertThat(ArrayContains.INSTANCE.test(arrayType, null, 2)).isFalse();
+        assertThat(
+                        ArrayContains.INSTANCE.test(
+                                arrayType,
+                                new GenericArray(new Integer[] {1, null}),
+                                (Object) null))
+                .isFalse();
+        assertThat(containsTwo.negate()).isEmpty();
+    }
+
+    @Test
+    public void testArraysOverlap() {
+        PredicateBuilder builder =
+                new PredicateBuilder(RowType.of(DataTypes.ARRAY(DataTypes.INT())));
+        Predicate overlap = builder.arraysOverlap(0, Arrays.asList(9, null, 2, 2));
+        Predicate noOverlap = builder.arraysOverlap(0, Arrays.asList(9, null));
+        Predicate empty = builder.arraysOverlap(0, new ArrayList<>());
+
+        GenericRow row = GenericRow.of(new GenericArray(new Integer[] {1, null, 2, 2}));
+        assertThat(overlap.test(row)).isTrue();
+        assertThat(noOverlap.test(row)).isFalse();
+        assertThat(empty.test(row)).isFalse();
+        assertThat(overlap.test(GenericRow.of((Object) null))).isFalse();
+        assertThat(overlap.negate()).isEmpty();
+    }
+
+    @Test
+    public void testArrayContainsAll() {
+        PredicateBuilder builder =
+                new PredicateBuilder(RowType.of(DataTypes.ARRAY(DataTypes.INT())));
+        Predicate containsAll = builder.arrayContainsAll(0, Arrays.asList(2, 1, 2));
+        Predicate missing = builder.arrayContainsAll(0, Arrays.asList(1, 3));
+        Predicate containsNull = builder.arrayContainsAll(0, Arrays.asList(1, null));
+        Predicate empty = builder.arrayContainsAll(0, new ArrayList<>());
+
+        GenericRow row = GenericRow.of(new GenericArray(new Integer[] {1, null, 2, 2}));
+        assertThat(containsAll.test(row)).isTrue();
+        assertThat(missing.test(row)).isFalse();
+        assertThat(containsNull.test(row)).isFalse();
+        assertThat(empty.test(row)).isTrue();
+        assertThat(empty.test(GenericRow.of(new GenericArray(new Integer[0])))).isTrue();
+        assertThat(empty.test(GenericRow.of((Object) null))).isFalse();
+        assertThat(containsAll.negate()).isEmpty();
+    }
+
+    @Test
+    public void testArrayContainsRequiresArrayField() {
+        PredicateBuilder builder = new PredicateBuilder(RowType.of(DataTypes.INT()));
+
+        assertThatThrownBy(() -> builder.arrayContains(0, 1))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("ARRAY_CONTAINS requires an ARRAY field");
+        assertThatThrownBy(() -> builder.arraysOverlap(0, Arrays.asList(1, 2)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("ARRAYS_OVERLAP requires an ARRAY field");
+        assertThatThrownBy(() -> builder.arrayContainsAll(0, Arrays.asList(1, 2)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("ARRAY_CONTAINS_ALL requires an ARRAY field");
+    }
+
+    // ---- or()/and() binary tree structure tests ----
+
+    @Test
+    public void testOrBinaryTree() {
+        PredicateBuilder builder = new PredicateBuilder(RowType.of(new IntType()));
+        List<Predicate> predicates =
+                IntStream.range(0, 25)
+                        .mapToObj(i -> builder.equal(0, i))
+                        .collect(Collectors.toList());
+
+        Predicate result = PredicateBuilder.or(predicates);
+
+        assertThat(result).isInstanceOf(CompoundPredicate.class);
+        CompoundPredicate root = (CompoundPredicate) result;
+        assertThat(root.function()).isEqualTo(Or.INSTANCE);
+        assertThat(root.children()).hasSize(2);
+        assertThat(countLeaves(root)).isEqualTo(25);
+        assertThat(maxDepth(root)).isLessThanOrEqualTo(5);
+    }
+
+    @Test
+    public void testOrBinaryTreeEvaluation() {
+        PredicateBuilder builder = new PredicateBuilder(RowType.of(new IntType()));
+        List<Predicate> predicates =
+                IntStream.range(0, 25)
+                        .mapToObj(i -> builder.equal(0, i))
+                        .collect(Collectors.toList());
+
+        Predicate result = PredicateBuilder.or(predicates);
+
+        assertThat(result.test(GenericRow.of(0))).isTrue();
+        assertThat(result.test(GenericRow.of(24))).isTrue();
+        assertThat(result.test(GenericRow.of(25))).isFalse();
+    }
+
+    @Test
+    public void testAndBinaryTree() {
+        PredicateBuilder builder = new PredicateBuilder(RowType.of(new IntType()));
+        List<Predicate> predicates =
+                IntStream.range(0, 25)
+                        .mapToObj(i -> builder.greaterThan(0, i))
+                        .collect(Collectors.toList());
+
+        Predicate result = PredicateBuilder.and(predicates);
+
+        assertThat(result).isInstanceOf(CompoundPredicate.class);
+        CompoundPredicate root = (CompoundPredicate) result;
+        assertThat(root.function()).isEqualTo(And.INSTANCE);
+        assertThat(root.children()).hasSize(2);
+        assertThat(countLeaves(root)).isEqualTo(25);
+        assertThat(maxDepth(root)).isLessThanOrEqualTo(5);
+    }
+
+    private static int countLeaves(Predicate predicate) {
+        if (!(predicate instanceof CompoundPredicate)) {
+            return 1;
+        }
+        int count = 0;
+        for (Predicate child : ((CompoundPredicate) predicate).children()) {
+            count += countLeaves(child);
+        }
+        return count;
+    }
+
+    private static int maxDepth(Predicate predicate) {
+        if (!(predicate instanceof CompoundPredicate)) {
+            return 0;
+        }
+        int max = 0;
+        for (Predicate child : ((CompoundPredicate) predicate).children()) {
+            max = Math.max(max, maxDepth(child));
+        }
+        return 1 + max;
     }
 
     @Test

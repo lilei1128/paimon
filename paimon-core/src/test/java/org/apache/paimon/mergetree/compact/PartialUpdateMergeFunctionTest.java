@@ -19,6 +19,7 @@
 package org.apache.paimon.mergetree.compact;
 
 import org.apache.paimon.KeyValue;
+import org.apache.paimon.data.Blob;
 import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.types.DataType;
@@ -97,6 +98,42 @@ public class PartialUpdateMergeFunctionTest {
     }
 
     @Test
+    public void testSequenceGroupWithBlobField() {
+        Options options = new Options();
+        options.set("fields.f3.sequence-group", "f1,f2");
+        RowType rowType =
+                RowType.of(DataTypes.INT(), DataTypes.INT(), DataTypes.BLOB(), DataTypes.INT());
+        MergeFunction<KeyValue> func =
+                PartialUpdateMergeFunction.factory(options, rowType, ImmutableList.of("f0"))
+                        .create();
+        func.reset();
+
+        Blob first = Blob.fromData(new byte[] {1, 2, 3});
+        Blob second = Blob.fromData(new byte[] {4, 5, 6});
+        Blob third = Blob.fromData(new byte[] {7, 8, 9});
+
+        addBlobRow(func, RowKind.INSERT, 1, 10, first, 1);
+        addBlobRow(func, RowKind.INSERT, 1, 20, second, null);
+        // null sequence group should not overwrite f1/f2
+        assertBlobRow(func, 1, 10, first, 1);
+
+        addBlobRow(func, RowKind.INSERT, 1, 30, third, 2);
+        assertBlobRow(func, 1, 30, third, 2);
+
+        // equal sequence should overwrite the entire group
+        addBlobRow(func, RowKind.INSERT, 1, 40, second, 2);
+        assertBlobRow(func, 1, 40, second, 2);
+
+        // valid sequence should overwrite the entire group, including with null
+        addBlobRow(func, RowKind.INSERT, 1, 50, null, 3);
+        assertBlobRow(func, 1, 50, null, 3);
+
+        // older sequence should not overwrite
+        addBlobRow(func, RowKind.INSERT, 1, 60, first, 2);
+        assertBlobRow(func, 1, 50, null, 3);
+    }
+
+    @Test
     public void testSequenceGroupPartialDelete() {
         Options options = new Options();
         options.set("fields.f3.sequence-group", "f1,f2");
@@ -125,11 +162,51 @@ public class PartialUpdateMergeFunctionTest {
         add(func, RowKind.DELETE, 1, 1, 1, 3, 1, 1, null);
         validate(func, 1, null, null, 3, 3, 3, 3);
         add(func, RowKind.DELETE, 1, 1, 1, 3, 1, 1, 4);
-        validate(func, null, null, null, null, null, null, null);
+        validate(func, 1, 1, 1, 3, 1, 1, 4);
         add(func, 1, 4, 4, 4, 5, 5, 5);
         validate(func, 1, 4, 4, 4, 5, 5, 5);
         add(func, RowKind.DELETE, 1, 1, 1, 6, 1, 1, 6);
-        validate(func, null, null, null, null, null, null, null);
+        validate(func, 1, 1, 1, 6, 1, 1, 6);
+    }
+
+    @Test
+    public void testSequenceGroupPartialDeleteWithProjection() {
+        Options options = new Options();
+        options.set("fields.f3.sequence-group", "f1,f2");
+        options.set("fields.f6.sequence-group", "f4,f5");
+        options.set("partial-update.remove-record-on-sequence-group", "f3,f6");
+        RowType rowType =
+                RowType.of(
+                        DataTypes.INT(),
+                        DataTypes.INT(),
+                        DataTypes.INT(),
+                        DataTypes.INT(),
+                        DataTypes.INT(),
+                        DataTypes.INT(),
+                        DataTypes.INT());
+        MergeFunctionFactory<KeyValue> factory =
+                PartialUpdateMergeFunction.factory(options, rowType, ImmutableList.of("f0"));
+
+        // Reordered fields
+        RowType projectedType =
+                RowType.of(
+                        new DataType[] {
+                            DataTypes.INT(),
+                            DataTypes.INT(),
+                            DataTypes.INT(),
+                            DataTypes.INT(),
+                            DataTypes.INT(),
+                            DataTypes.INT(),
+                            DataTypes.INT()
+                        },
+                        new String[] {"f3", "f6", "f0", "f1", "f2", "f4", "f5"});
+        MergeFunction<KeyValue> func = factory.create(projectedType);
+
+        func.reset();
+        add(func, 11, 22, 100, 200, 1, 12, 21);
+        add(func, RowKind.DELETE, 11, 22, 100, 200, 1, 12, 21);
+
+        validate(func, 11, 22, 100, 200, 1, 12, 21);
     }
 
     @Test
@@ -848,6 +925,69 @@ public class PartialUpdateMergeFunctionTest {
     }
 
     @Test
+    public void testSequenceGroupCannotContainPrimaryKey() {
+        // Issue #7052: Putting a primary key column in sequence-group should be forbidden
+        // as it causes Parquet decoding failures during compaction
+        Options options = new Options();
+        options.set("fields.f0.sequence-group", "f1,f2");
+        RowType rowType =
+                RowType.of(DataTypes.INT(), DataTypes.INT(), DataTypes.INT(), DataTypes.INT());
+        assertThatThrownBy(
+                        () ->
+                                PartialUpdateMergeFunction.factory(
+                                        options, rowType, ImmutableList.of("f0")))
+                .hasMessageContaining(
+                        "The sequence-group 'fields.f0.sequence-group' contains primary key field 'f0', "
+                                + "which is not allowed. Primary key columns cannot be put in sequence-group.");
+    }
+
+    @Test
+    public void testMultiSequenceFieldsCannotContainPrimaryKey() {
+        // Issue #7052: Multi-field sequence-group also cannot contain primary key columns
+        // The sequence fields (f2,f3) are the "self" part, they must not contain PKs
+        Options options = new Options();
+        options.set("fields.f2,f3.sequence-group", "f0,f4");
+        RowType rowType =
+                RowType.of(
+                        DataTypes.INT(),
+                        DataTypes.INT(),
+                        DataTypes.INT(),
+                        DataTypes.INT(),
+                        DataTypes.INT(),
+                        DataTypes.INT());
+        assertThatThrownBy(
+                        () ->
+                                PartialUpdateMergeFunction.factory(
+                                        options, rowType, ImmutableList.of("f2")))
+                .hasMessageContaining(
+                        "The sequence-group 'fields.f2,f3.sequence-group' contains primary key field 'f2', "
+                                + "which is not allowed. Primary key columns cannot be put in sequence-group.");
+    }
+
+    @Test
+    public void testPrimaryKeyCannotBeInSequenceGroupValue() {
+        // Issue #7052: A primary key column appearing in the value part of sequence-group
+        // is forbidden — f2 is the PK and appears in the sequence-group's value list
+        Options options = new Options();
+        options.set("fields.f4.sequence-group", "f1,f2");
+        RowType rowType =
+                RowType.of(
+                        DataTypes.INT(),
+                        DataTypes.INT(),
+                        DataTypes.INT(),
+                        DataTypes.INT(),
+                        DataTypes.INT(),
+                        DataTypes.INT());
+        assertThatThrownBy(
+                        () ->
+                                PartialUpdateMergeFunction.factory(
+                                        options, rowType, ImmutableList.of("f2")))
+                .hasMessageContaining(
+                        "The sequence-group 'fields.f4.sequence-group' contains primary key field 'f2', "
+                                + "which is not allowed. Primary key columns cannot be put in sequence-group.");
+    }
+
+    @Test
     public void testDeleteReproduceCorrectSequenceNumber() {
         Options options = new Options();
         options.set("partial-update.remove-record-on-delete", "true");
@@ -872,6 +1012,29 @@ public class PartialUpdateMergeFunctionTest {
         assertThat(func.getResult().sequenceNumber()).isEqualTo(1);
     }
 
+    @Test
+    public void testInitRowWithNullableFieldOnDelete() {
+        Options options = new Options();
+        options.set("partial-update.remove-record-on-delete", "true");
+        RowType rowType =
+                RowType.of(
+                        DataTypes.INT().notNull(),
+                        DataTypes.INT().notNull(),
+                        DataTypes.INT(),
+                        DataTypes.INT());
+        MergeFunction<KeyValue> func =
+                PartialUpdateMergeFunction.factory(options, rowType, ImmutableList.of("f0"))
+                        .create();
+        func.reset();
+
+        // insert some data first
+        add(func, 1, 3, 5, 7);
+        // send a DELETE with nullable field as null, triggers initRow
+        add(func, RowKind.DELETE, 1, 2, 2, null);
+        // after delete with removeRecordOnDelete, row is re-initialized via initRow
+        validate(func, 1, 2, 2, null);
+    }
+
     private void add(MergeFunction<KeyValue> function, Integer... f) {
         add(function, RowKind.INSERT, f);
     }
@@ -879,6 +1042,28 @@ public class PartialUpdateMergeFunctionTest {
     private void add(MergeFunction<KeyValue> function, RowKind rowKind, Integer... f) {
         function.add(
                 new KeyValue().replace(GenericRow.of(1), sequence++, rowKind, GenericRow.of(f)));
+    }
+
+    private void addBlobRow(
+            MergeFunction<KeyValue> function,
+            RowKind rowKind,
+            Integer pk,
+            Integer name,
+            Blob payload,
+            Integer ts) {
+        function.add(
+                new KeyValue()
+                        .replace(
+                                GenericRow.of(pk),
+                                sequence++,
+                                rowKind,
+                                GenericRow.of(pk, name, payload, ts)));
+    }
+
+    private void assertBlobRow(
+            MergeFunction<KeyValue> function, Integer pk, Integer name, Blob payload, Integer ts) {
+        GenericRow expected = GenericRow.of(pk, name, payload, ts);
+        assertThat(function.getResult().value()).isEqualTo(expected);
     }
 
     private void validate(MergeFunction<KeyValue> function, Integer... f) {

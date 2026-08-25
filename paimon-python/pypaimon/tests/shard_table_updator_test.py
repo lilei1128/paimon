@@ -1,24 +1,25 @@
-"""
-Licensed to the Apache Software Foundation (ASF) under one
-or more contributor license agreements.  See the NOTICE file
-distributed with this work for additional information
-regarding copyright ownership.  The ASF licenses this file
-to you under the Apache License, Version 2.0 (the
-"License"); you may not use this file except in compliance
-with the License.  You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
 import os
 import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import pyarrow as pa
 
@@ -590,6 +591,140 @@ class ShardTableUpdatorTest(unittest.TestCase):
             "got %s. _ROW_ID and _SEQUENCE_NUMBER should NOT be returned when not in projection."
             % actual_columns
         )
+
+    def test_shard_update_passes_allow_rollback_true(self):
+        table_schema = pa.schema([
+            ('a', pa.int32()),
+            ('b', pa.int32()),
+        ])
+        schema = Schema.from_pyarrow_schema(
+            table_schema,
+            options={'row-tracking.enabled': 'true', 'data-evolution.enabled': 'true'}
+        )
+        name = self._create_unique_table_name('rollback')
+        self.catalog.create_table(name, schema, False)
+        table = self.catalog.get_table(name)
+
+        write_builder = table.new_batch_write_builder()
+        tw = write_builder.new_write().with_write_type(['a', 'b'])
+        tc = write_builder.new_commit()
+        tw.write_arrow(pa.Table.from_pydict(
+            {'a': [1, 2], 'b': [10, 20]},
+            schema=table_schema,
+        ))
+        tc.commit(tw.prepare_commit())
+        tw.close()
+        tc.close()
+
+        upd = write_builder.new_update()
+        upd.with_read_projection(['a'])
+        upd.with_update_type(['b'])
+        shard = upd.new_shard_updator(0, 1)
+        reader = shard.arrow_reader()
+        for batch in iter(reader.read_next_batch, None):
+            shard.update_by_arrow_batch(pa.RecordBatch.from_pydict(
+                {'b': [99] * batch.num_rows},
+                schema=pa.schema([('b', pa.int32())]),
+            ))
+        commit_messages = shard.prepare_commit()
+
+        from pypaimon.write.file_store_commit import FileStoreCommit
+        original_try_commit = FileStoreCommit._try_commit
+        captured_args = {}
+
+        def spy_try_commit(self_inner, **kwargs):
+            captured_args.update(kwargs)
+            return original_try_commit(self_inner, **kwargs)
+
+        with patch.object(FileStoreCommit, '_try_commit', spy_try_commit):
+            tc2 = write_builder.new_commit()
+            tc2.commit(commit_messages)
+            tc2.close()
+
+        self.assertTrue(
+            captured_args.get('allow_rollback', False),
+            "Row-id-check commits must pass allow_rollback=True so that "
+            "concurrent COMPACT snapshots can be rolled back on conflict."
+        )
+        self.assertTrue(
+            captured_args.get('detect_conflicts', False),
+            "Row-id-check commits must enable conflict detection."
+        )
+
+    def test_shard_update_ignores_target_file_row_num(self):
+        """Regression: a shard maps to exactly one output file, so
+        target-file-row-num must not split it. Before the fix the
+        directly-constructed AppendOnlyDataWriter honoured the option and
+        rolled the 5-row shard into three files, failing SingleWriter.end()
+        with "Should have one file."."""
+        table_schema = pa.schema([
+            ('a', pa.int32()),
+            ('b', pa.int32()),
+            ('c', pa.int32()),
+            ('d', pa.int32()),
+        ])
+        schema = Schema.from_pyarrow_schema(
+            table_schema,
+            options={'row-tracking.enabled': 'true', 'data-evolution.enabled': 'true'},
+        )
+        name = self._create_unique_table_name('row_num_rolling')
+        self.catalog.create_table(name, schema, False)
+        table = self.catalog.get_table(name)
+
+        # One 5-row file for a, b, c.
+        wb = table.new_batch_write_builder()
+        tw = wb.new_write().with_write_type(['a', 'b', 'c'])
+        tc = wb.new_commit()
+        tw.write_arrow(pa.Table.from_pydict({
+            'a': [1, 2, 3, 4, 5],
+            'b': [10, 20, 30, 40, 50],
+            'c': [100, 200, 300, 400, 500],
+        }, schema=pa.schema([
+            ('a', pa.int32()), ('b', pa.int32()), ('c', pa.int32()),
+        ])))
+        tc.commit(tw.prepare_commit())
+        tw.close()
+        tc.close()
+
+        # Enable row-count rolling (limit 2). The shard still covers all 5
+        # rows and must emit a single file.
+        table = table.copy({'target-file-row-num': '2'})
+
+        wb = table.new_batch_write_builder()
+        upd = wb.new_update()
+        upd.with_read_projection(['a', 'b', 'c'])
+        upd.with_update_type(['d'])
+        shard = upd.new_shard_updator(0, 1)
+        reader = shard.arrow_reader()
+        for batch in iter(reader.read_next_batch, None):
+            a_ = batch.column('a').to_pylist()
+            b_ = batch.column('b').to_pylist()
+            c_ = batch.column('c').to_pylist()
+            shard.update_by_arrow_batch(pa.RecordBatch.from_pydict(
+                {'d': [c + b - a for a, b, c in zip(a_, b_, c_)]},
+                schema=pa.schema([('d', pa.int32())]),
+            ))
+
+        # Without the fix this raises "Should have one file."
+        commit_messages = shard.prepare_commit()
+        new_file_count = sum(len(m.new_files) for m in commit_messages)
+        self.assertEqual(
+            1, new_file_count, "shard update must write exactly one file")
+
+        tc = wb.new_commit()
+        tc.commit(commit_messages)
+        tc.close()
+
+        rb = table.new_read_builder()
+        tr = rb.new_read()
+        actual = tr.to_arrow(rb.new_scan().plan().splits())
+        expected = pa.Table.from_pydict({
+            'a': [1, 2, 3, 4, 5],
+            'b': [10, 20, 30, 40, 50],
+            'c': [100, 200, 300, 400, 500],
+            'd': [109, 218, 327, 436, 545],
+        }, schema=table_schema)
+        self.assertEqual(actual, expected)
 
 
 if __name__ == '__main__':

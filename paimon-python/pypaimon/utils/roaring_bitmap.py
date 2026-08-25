@@ -1,20 +1,19 @@
-################################################################################
-#  Licensed to the Apache Software Foundation (ASF) under one
-#  or more contributor license agreements.  See the NOTICE file
-#  distributed with this work for additional information
-#  regarding copyright ownership.  The ASF licenses this file
-#  to you under the Apache License, Version 2.0 (the
-#  "License"); you may not use this file except in compliance
-#  with the License.  You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-#      http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-# limitations under the License.
-################################################################################
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 """
 Roaring Bitmap.
@@ -84,20 +83,19 @@ class RoaringBitmap64:
         if self.is_empty():
             return []
 
-        # Use pyroaring's efficient iteration
         ranges = []
-        sorted_values = list(self._data)
-        start = sorted_values[0]
+        iterator = iter(self._data)
+        start = next(iterator)
         end = start
 
-        for i in range(1, len(sorted_values)):
-            if sorted_values[i] == end + 1:
+        for value in iterator:
+            if value == end + 1:
                 # Consecutive, extend the range
-                end = sorted_values[i]
+                end = value
             else:
                 # Gap, close current range and start new one
                 ranges.append(Range(start, end))
-                start = sorted_values[i]
+                start = value
                 end = start
 
         # Add the last range
@@ -124,6 +122,10 @@ class RoaringBitmap64:
         result = RoaringBitmap64()
         result._data = a._data - b._data
         return result
+
+    def remove_all_inplace(self, other: 'RoaringBitmap64') -> None:
+        """Remove all values contained in ``other`` from this bitmap, in place."""
+        self._data -= other._data
 
     def serialize(self) -> bytes:
         """Serialize the bitmap to bytes."""

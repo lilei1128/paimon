@@ -98,6 +98,7 @@ public abstract class ManifestFileMetaTestBase {
                         null,
                         null,
                         null,
+                        null,
                         null));
     }
 
@@ -105,9 +106,9 @@ public abstract class ManifestFileMetaTestBase {
         return getManifestFile().write(Arrays.asList(entries)).get(0);
     }
 
-    abstract ManifestFile getManifestFile();
+    protected abstract ManifestFile getManifestFile();
 
-    abstract RowType getPartitionType();
+    protected abstract RowType getPartitionType();
 
     protected void assertEquivalentEntries(
             List<ManifestFileMeta> input, List<ManifestFileMeta> merged) {
@@ -137,6 +138,11 @@ public abstract class ManifestFileMetaTestBase {
     protected ManifestFile createManifestFile(String pathStr) {
         Path path = new Path(pathStr);
         FileIO fileIO = FileIOFinder.find(path);
+        return createManifestFile(pathStr, fileIO);
+    }
+
+    protected ManifestFile createManifestFile(String pathStr, FileIO fileIO) {
+        Path path = new Path(pathStr);
         return new ManifestFile.Factory(
                         fileIO,
                         new SchemaManager(fileIO, path),

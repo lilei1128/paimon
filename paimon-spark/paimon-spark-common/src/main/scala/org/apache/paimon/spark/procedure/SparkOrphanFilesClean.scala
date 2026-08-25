@@ -125,11 +125,15 @@ case class SparkOrphanFilesClean(
       .parallelize(fileDirs, maxFileDirsParallelism)
       .flatMap {
         dir =>
-          tryBestListingDirs(new Path(dir)).asScala.filter(oldEnough).map {
-            file =>
-              val path = file.getPath
-              (path.getName, path.toString, file.getLen, path.getParent.toString)
-          }
+          tryBestListingDirs(new Path(dir)).asScala
+            .filter(file => !file.isDir())
+            .filter(file => !isManagedBlobPack(file.getPath))
+            .filter(oldEnough)
+            .map {
+              file =>
+                val path = file.getPath
+                (path.getName, path.toString, file.getLen, path.getParent.toString)
+            }
       }
       .toDF("name", "path", "len", "dataDir")
       .repartition(parallelism)

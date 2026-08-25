@@ -30,8 +30,14 @@ import org.apache.paimon.catalog.RenamingSnapshotCommit;
 import org.apache.paimon.catalog.SnapshotCommit;
 import org.apache.paimon.catalog.TableRollback;
 import org.apache.paimon.operation.Lock;
+import org.apache.paimon.options.Options;
+import org.apache.paimon.rest.RESTApi;
+import org.apache.paimon.rest.RESTCatalogFactory;
+import org.apache.paimon.rest.RESTCatalogLoader;
+import org.apache.paimon.rest.RESTUtil;
 import org.apache.paimon.table.source.TableQueryAuth;
 import org.apache.paimon.tag.SnapshotLoaderImpl;
+import org.apache.paimon.utils.JsonSerdeUtil;
 import org.apache.paimon.utils.SnapshotLoader;
 import org.apache.paimon.utils.SnapshotManager;
 
@@ -39,11 +45,15 @@ import javax.annotation.Nullable;
 
 import java.io.Serializable;
 import java.util.Optional;
+import java.util.function.LongConsumer;
+
+import static org.apache.paimon.options.CatalogOptions.METASTORE;
 
 /** Catalog environment in table which contains log factory, metastore client factory. */
 public class CatalogEnvironment implements Serializable {
 
     private static final long serialVersionUID = 2L;
+    private static final String READ_VIA_OPTION = RESTApi.HEADER_PREFIX + RESTApi.READ_VIA_HEADER;
 
     @Nullable private final Identifier identifier;
     @Nullable private final String uuid;
@@ -113,6 +123,15 @@ public class CatalogEnvironment implements Serializable {
     }
 
     @Nullable
+    public SchemaModification schemaModification() {
+        if (catalogLoader == null) {
+            return null;
+        }
+        Catalog catalog = catalogLoader.load();
+        return SchemaModification.create(catalog, identifier);
+    }
+
+    @Nullable
     public SnapshotCommit snapshotCommit(SnapshotManager snapshotManager) {
         SnapshotCommit snapshotCommit;
         if (catalogLoader != null && supportsVersionManagement) {
@@ -135,6 +154,21 @@ public class CatalogEnvironment implements Serializable {
             return (instant, fromSnapshot) -> {
                 try {
                     catalog.rollbackTo(identifier, instant, fromSnapshot);
+                } catch (Catalog.TableNotExistException e) {
+                    throw new RuntimeException(e);
+                }
+            };
+        }
+        return null;
+    }
+
+    @Nullable
+    public LongConsumer catalogSchemaRollback() {
+        if (catalogLoader != null && supportsVersionManagement) {
+            Catalog catalog = catalogLoader.load();
+            return schemaId -> {
+                try {
+                    catalog.rollbackSchema(identifier, schemaId);
                 } catch (Catalog.TableNotExistException e) {
                     throw new RuntimeException(e);
                 }
@@ -169,6 +203,45 @@ public class CatalogEnvironment implements Serializable {
     @Nullable
     public CatalogContext catalogContext() {
         return catalogContext;
+    }
+
+    /**
+     * Returns a context for loading tables referenced while reading this table.
+     *
+     * <p>For REST catalogs, the outermost table identifier is attached as an optional request
+     * header. A context which already carries the header is returned unchanged so nested
+     * dependencies preserve the original table.
+     */
+    @Nullable
+    CatalogContext dependencyReadContext() {
+        if (identifier == null || catalogContext == null) {
+            return catalogContext;
+        }
+
+        boolean restCatalog =
+                catalogLoader instanceof RESTCatalogLoader
+                        || RESTCatalogFactory.IDENTIFIER.equals(
+                                catalogContext.options().get(METASTORE));
+        if (!restCatalog) {
+            return catalogContext;
+        }
+
+        Options options = catalogContext.options();
+        if (options.containsKey(READ_VIA_OPTION)) {
+            return catalogContext;
+        }
+
+        Options dependencyOptions = new Options(options.toMap());
+        if (!dependencyOptions.contains(METASTORE)) {
+            dependencyOptions.set(METASTORE, RESTCatalogFactory.IDENTIFIER);
+        }
+        dependencyOptions.set(
+                READ_VIA_OPTION, RESTUtil.encodeString(JsonSerdeUtil.toFlatJson(identifier)));
+        return CatalogContext.create(
+                dependencyOptions,
+                catalogContext.hadoopConf(),
+                catalogContext.preferIO(),
+                catalogContext.fallbackIO());
     }
 
     public CatalogEnvironment copy(Identifier identifier) {

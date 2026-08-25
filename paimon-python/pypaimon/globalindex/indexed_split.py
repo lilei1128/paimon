@@ -1,20 +1,19 @@
-################################################################################
-#  Licensed to the Apache Software Foundation (ASF) under one
-#  or more contributor license agreements.  See the NOTICE file
-#  distributed with this work for additional information
-#  regarding copyright ownership.  The ASF licenses this file
-#  to you under the Apache License, Version 2.0 (the
-#  "License"); you may not use this file except in compliance
-#  with the License.  You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-#      http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-# limitations under the License.
-################################################################################
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 """
 IndexedSplit wraps a Split with row ranges and optional scores.
@@ -31,11 +30,13 @@ class IndexedSplit(Split):
         self,
         data_split: 'Split',
         row_ranges: List['Range'],
-        scores: Optional[List[float]] = None
+        scores: Optional[List[float]] = None,
+        exact_merged_row_count: Optional[int] = None,
     ):
         self._data_split = data_split
         self._row_ranges = row_ranges
         self._scores = scores
+        self._exact_merged_row_count = exact_merged_row_count
 
     def data_split(self) -> 'Split':
         """Return the underlying data split."""
@@ -77,6 +78,8 @@ class IndexedSplit(Split):
         return sum(r.count() for r in self._row_ranges)
 
     def merged_row_count(self):
+        if self._exact_merged_row_count is not None:
+            return self._exact_merged_row_count
         return self.row_count
 
     # Delegate other properties to data_split
@@ -100,6 +103,11 @@ class IndexedSplit(Split):
     def data_deletion_files(self):
         """Delegate to data_split."""
         return self._data_split.data_deletion_files
+
+    @property
+    def snapshot_id(self):
+        """Delegate to data_split."""
+        return self._data_split.snapshot_id
 
     def contains_row_id(self, row_id: int) -> bool:
         """Check if the given row ID is in the row ranges."""
@@ -129,14 +137,23 @@ class IndexedSplit(Split):
     def __eq__(self, other):
         if not isinstance(other, IndexedSplit):
             return False
-        return (self._data_split == other._data_split and
-                self._row_ranges == other._row_ranges and
-                self._scores == other._scores)
+        return (
+            self._data_split == other._data_split
+            and self._row_ranges == other._row_ranges
+            and self._scores == other._scores
+            and self._exact_merged_row_count == other._exact_merged_row_count
+        )
 
     def __hash__(self):
         scores_hash = tuple(self._scores) if self._scores else None
-        return hash((id(self._data_split), tuple(self._row_ranges), scores_hash))
+        return hash((
+            id(self._data_split),
+            tuple(self._row_ranges),
+            scores_hash,
+            self._exact_merged_row_count,
+        ))
 
     def __repr__(self):
         return (f"IndexedSplit(data_split={self._data_split}, "
-                f"row_ranges={self._row_ranges}, scores={self._scores})")
+                f"row_ranges={self._row_ranges}, scores={self._scores}, "
+                f"exact_merged_row_count={self._exact_merged_row_count})")

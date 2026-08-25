@@ -86,12 +86,6 @@ public class DataFilePathFactory {
         return newPathFromName(newFileName(dataFilePrefix, ".blob"));
     }
 
-    /** Create a new blob file path under the given external storage path for descriptor fields. */
-    public Path newExternalStorageBlobPath(String externalStoragePath) {
-        String fileName = newFileName(dataFilePrefix, ".blob");
-        return new Path(externalStoragePath, fileName);
-    }
-
     public Path newChangelogPath() {
         return newPath(changelogFilePrefix);
     }
@@ -105,6 +99,15 @@ public class DataFilePathFactory {
     }
 
     private String newFileName(String prefix) {
+        return newFileName(prefix, makeExtension(compressExtension, formatIdentifier));
+    }
+
+    public Path newVectorPath(String formatIdentifier) {
+        String extension = ".vector" + makeExtension(compressExtension, formatIdentifier);
+        return newPathFromName(newFileName(dataFilePrefix, extension));
+    }
+
+    private String makeExtension(String compressExtension, String formatIdentifier) {
         String extension;
         if (compressExtension != null && isTextFormat(formatIdentifier)) {
             extension = "." + formatIdentifier + "." + compressExtension;
@@ -113,7 +116,7 @@ public class DataFilePathFactory {
         } else {
             extension = "." + formatIdentifier;
         }
-        return newFileName(prefix, extension);
+        return extension;
     }
 
     public Path newPathFromExtension(String extension) {

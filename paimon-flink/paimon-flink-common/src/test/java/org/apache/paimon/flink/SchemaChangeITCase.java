@@ -273,7 +273,7 @@ public class SchemaChangeITCase extends CatalogITCaseBase {
         assertThatThrownBy(() -> sql("ALTER TABLE T MODIFY (f BOOLEAN)"))
                 .hasRootCauseInstanceOf(IllegalStateException.class)
                 .hasRootCauseMessage(
-                        "Column type f[DOUBLE] cannot be converted to BOOLEAN without loosing information.");
+                        "Column type f[DOUBLE] cannot be converted to BOOLEAN without losing information.");
     }
 
     @Test
@@ -1031,6 +1031,45 @@ public class SchemaChangeITCase extends CatalogITCaseBase {
     }
 
     @Test
+    public void testSequenceFieldSortOrderWithWriteSideMerge() {
+        // When multiple rows with the same primary key are written in a single INSERT,
+        // they are merged on the write side by SortBufferWriteBuffer.
+        // This test verifies that sequence.field.sort-order=descending is correctly
+        // applied during write-side merge (not just merge-on-read).
+        sql(
+                "CREATE TABLE T_WRITE_MERGE (a STRING PRIMARY KEY NOT ENFORCED, b STRING, c BIGINT)"
+                        + " WITH ("
+                        + "'sequence.field'='c', "
+                        + "'sequence.field.sort-order'='descending', "
+                        + "'bucket'='1')");
+
+        // Insert multiple rows with the same key in a single statement to trigger write-side merge
+        sql("INSERT INTO T_WRITE_MERGE VALUES ('a', 'b', 1), ('a', 'd', 3), ('a', 'e', 2)");
+
+        // With descending sort order, the smallest sequence value (c=1) should win
+        assertThat(sql("select * from T_WRITE_MERGE").toString()).isEqualTo("[+I[a, b, 1]]");
+    }
+
+    @Test
+    public void testSequenceFieldSortOrderWithIntKeys() {
+        // When both primary key and sequence field are INT types, their NormalizedKey
+        // would fit within 18 bytes (5+5=10). This test verifies that UDS descending
+        // still works correctly because NormalizedKey only covers key fields in this case.
+        sql(
+                "CREATE TABLE T_INT_MERGE (a INT PRIMARY KEY NOT ENFORCED, b INT)"
+                        + " WITH ("
+                        + "'sequence.field'='b', "
+                        + "'sequence.field.sort-order'='descending', "
+                        + "'bucket'='1')");
+
+        // Insert multiple rows with the same key to trigger write-side merge
+        sql("INSERT INTO T_INT_MERGE VALUES (1, 10), (1, 30), (1, 20)");
+
+        // With descending sort order, the smallest sequence value (b=10) should win
+        assertThat(sql("select * from T_INT_MERGE").toString()).isEqualTo("[+I[1, 10]]");
+    }
+
+    @Test
     public void testAlterTableMetadataComment() {
         sql("CREATE TABLE T (a INT, name VARCHAR METADATA COMMENT 'header1', b INT)");
         List<Row> result = sql("SHOW CREATE TABLE T");
@@ -1566,13 +1605,13 @@ public class SchemaChangeITCase extends CatalogITCaseBase {
         assertThat(sql("SELECT * FROM T")).containsExactlyInAnyOrder(Row.of(1, 10), Row.of(2, 20));
         assertThatCode(() -> sql("ALTER TABLE T MODIFY v SMALLINT"))
                 .hasStackTraceContaining(
-                        "Column type v[INT] cannot be converted to SMALLINT without loosing information");
+                        "Column type v[INT] cannot be converted to SMALLINT without losing information");
         sql("ALTER TABLE T MODIFY v BIGINT");
         assertThat(sql("SELECT * FROM T"))
                 .containsExactlyInAnyOrder(Row.of(1, 10L), Row.of(2, 20L));
         assertThatCode(() -> sql("ALTER TABLE T MODIFY v INT"))
                 .hasStackTraceContaining(
-                        "Column type v[BIGINT] cannot be converted to INT without loosing information");
+                        "Column type v[BIGINT] cannot be converted to INT without losing information");
         // disable explicit type casting
         sql("ALTER TABLE T SET ('disable-explicit-type-casting' = 'false')");
         sql("ALTER TABLE T MODIFY v INT");
@@ -1775,5 +1814,50 @@ public class SchemaChangeITCase extends CatalogITCaseBase {
                 .containsExactlyInAnyOrder(
                         Row.of(1L, 100L, "buy", null, null, null, "2024-01-01", "10"),
                         Row.of(2L, 200L, "sell", 99.5, 10, 3.14, "2024-01-02", "11"));
+    }
+
+    @Test
+    public void testDropPrimaryKeyOnEmptyTable() {
+        sql("CREATE TABLE T (a INT, b INT, c STRING, PRIMARY KEY (a) NOT ENFORCED)");
+
+        // drop primary key on empty table should succeed
+        sql("ALTER TABLE T DROP PRIMARY KEY");
+
+        List<Row> result = sql("SHOW CREATE TABLE T");
+        assertThat(result.get(0).toString()).doesNotContain("PRIMARY KEY");
+    }
+
+    @Test
+    public void testDropPrimaryKeyOnNonEmptyTable() {
+        sql("CREATE TABLE T (a INT, b INT, c STRING, PRIMARY KEY (a) NOT ENFORCED)");
+        sql("INSERT INTO T VALUES (1, 2, 'hello')");
+
+        // drop primary key on non-empty table should fail
+        assertThatThrownBy(() -> sql("ALTER TABLE T DROP PRIMARY KEY"))
+                .satisfies(
+                        anyCauseMatches(
+                                UnsupportedOperationException.class,
+                                "Cannot drop primary keys on a non-empty table."));
+    }
+
+    private static final String BLOB_TABLE_OPTIONS =
+            "'row-tracking.enabled'='true', 'data-evolution.enabled'='true', 'bucket'='-1'";
+
+    @Test
+    public void testAddBlobColumnViaCommentDirective() {
+        sql("CREATE TABLE T (id INT, data STRING) WITH (" + BLOB_TABLE_OPTIONS + ")");
+
+        // bare directive — no user comment
+        sql("ALTER TABLE T ADD desc_col BYTES COMMENT '__BLOB_DESCRIPTOR_FIELD'");
+        // directive + user comment
+        sql("ALTER TABLE T ADD picture BYTES COMMENT '__BLOB_FIELD; profile picture'");
+
+        String createSql = sql("SHOW CREATE TABLE T").get(0).toString();
+        assertThat(createSql).doesNotContain("__BLOB");
+        assertThat(createSql).contains("`desc_col`");
+        assertThat(createSql).contains("`picture`");
+        assertThat(createSql).contains("COMMENT 'profile picture'");
+        assertThat(createSql).contains("'blob-field' = 'picture'");
+        assertThat(createSql).contains("'blob-descriptor-field' = 'desc_col'");
     }
 }

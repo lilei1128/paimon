@@ -134,7 +134,6 @@ public class TestFileStore extends KeyValueFileStore {
                 options,
                 partitionType,
                 keyType,
-                keyType,
                 valueType,
                 keyValueFieldsExtractor,
                 mfFactory,
@@ -249,8 +248,7 @@ public class TestFileStore extends KeyValueFileStore {
                 null,
                 null,
                 Collections.emptyList(),
-                (commit, committable) ->
-                        commit.overwritePartition(partition, committable, Collections.emptyMap()));
+                (commit, committable) -> commit.overwritePartition(partition, committable));
     }
 
     public Snapshot dropPartitions(List<Map<String, String>> partitions) {
@@ -717,7 +715,8 @@ public class TestFileStore extends KeyValueFileStore {
 
         // delta file
         if (options.changelogProducer() == CoreOptions.ChangelogProducer.NONE) {
-            // TODO why we need to keep base manifests?
+            // See FileDeletionBase#cleanUnusedManifests
+            // about why we need to keep base manifest
             result.add(pathFactory.toManifestListPath(changelog.baseManifestList()));
             manifestList
                     .readDataManifests(changelog)
@@ -820,7 +819,6 @@ public class TestFileStore extends KeyValueFileStore {
                     MemorySize.parse((ThreadLocalRandom.current().nextInt(16) + 1) + "kb"));
 
             conf.set(CoreOptions.FILE_FORMAT, format);
-            conf.set(CoreOptions.MANIFEST_FORMAT, format);
             conf.set(CoreOptions.PATH, root);
             conf.set(CoreOptions.BUCKET, numBuckets);
 

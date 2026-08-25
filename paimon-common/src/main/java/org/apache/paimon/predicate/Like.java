@@ -69,8 +69,10 @@ public class Like extends LeafBinaryFunction {
             Object literal = optimized.get().getValue();
             return field -> func.test(type, field, literal);
         }
-        // TODO optimize for chain checkers when there is no '_'
-        // TODO for example: "abc%def%","%abc%def","%abc%def%","abc%def"
+        LikeChainChecker chainChecker = LikeChainChecker.compile(patternLiteral.toString());
+        if (chainChecker != null) {
+            return chainChecker::test;
+        }
         String regex = sqlToRegexLike(patternLiteral.toString(), null);
         Pattern pattern = Pattern.compile(regex);
         return input -> pattern.matcher(input.toString()).matches();
@@ -114,7 +116,7 @@ public class Like extends LeafBinaryFunction {
                 javaPattern.append(nextChar);
                 ++i;
             } else if (c == '_') {
-                javaPattern.append('.');
+                javaPattern.append("(?s:.)");
             } else if (c == '%') {
                 javaPattern.append("(?s:.*)");
             } else {

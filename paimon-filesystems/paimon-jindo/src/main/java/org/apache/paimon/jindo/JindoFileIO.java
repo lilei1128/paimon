@@ -19,18 +19,24 @@
 package org.apache.paimon.jindo;
 
 import org.apache.paimon.catalog.CatalogContext;
+import org.apache.paimon.data.BlobDescriptor;
 import org.apache.paimon.fs.FileIO;
+import org.apache.paimon.fs.HadoopOptionsProvider;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.fs.TwoPhaseOutputStream;
 import org.apache.paimon.options.Options;
+import org.apache.paimon.oss.OSSBlobPresigner;
 import org.apache.paimon.utils.IOUtils;
 import org.apache.paimon.utils.Pair;
+import org.apache.paimon.utils.SensitiveConfigUtils;
 import org.apache.paimon.utils.StringUtils;
 
 import com.aliyun.jindodata.common.JindoHadoopSystem;
 import com.aliyun.jindodata.dls.JindoDlsFileSystem;
 import com.aliyun.jindodata.oss.JindoOssFileSystem;
 import com.aliyun.jindodata.oss.auth.SimpleCredentialsProvider;
+import com.aliyun.oss.OSSClient;
+import com.aliyun.oss.OSSClientBuilder;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.slf4j.Logger;
@@ -39,6 +45,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.URI;
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -48,7 +55,7 @@ import java.util.function.Supplier;
 import static org.apache.paimon.options.CatalogOptions.FILE_IO_ALLOW_CACHE;
 
 /** Jindo {@link FileIO}. */
-public class JindoFileIO extends HadoopCompliantFileIO {
+public class JindoFileIO extends HadoopCompliantFileIO implements HadoopOptionsProvider {
 
     private static final long serialVersionUID = 2L;
 
@@ -62,10 +69,13 @@ public class JindoFileIO extends HadoopCompliantFileIO {
      */
     private static final String[] CONFIG_PREFIXES = {"fs."};
 
+    private static final String OSS_ENDPOINT = "fs.oss.endpoint";
     private static final String OSS_ACCESS_KEY_ID = "fs.oss.accessKeyId";
     private static final String OSS_ACCESS_KEY_SECRET = "fs.oss.accessKeySecret";
     private static final String OSS_SECURITY_TOKEN = "fs.oss.securityToken";
+    private static final String OSS_REGION = "fs.oss.region";
     private static final String OSS_USER_AGENT_EXTENDED = "fs.oss.user.agent.extended";
+    private static final String OSS_SHOW_DIR_TIMESTAMP = "fs.oss.show-dir-timestamp";
     private static final String DLF_ACCESS_TRACKING_EXTENDED_INFO =
             "dlf.access-tracking.extended-info";
 
@@ -88,6 +98,13 @@ public class JindoFileIO extends HadoopCompliantFileIO {
     private Options hadoopOptions;
     private Options hadoopOptionsWithCache;
     private boolean allowCache = true;
+    private transient OSSClient blobClient;
+
+    public JindoFileIO() {}
+
+    JindoFileIO(OSSClient blobClient) {
+        this.blobClient = blobClient;
+    }
 
     @Override
     public boolean isObjectStore() {
@@ -112,7 +129,7 @@ public class JindoFileIO extends HadoopCompliantFileIO {
                     LOG.debug(
                             "Adding config entry for {} as {} to Hadoop config",
                             key,
-                            hadoopOptions.get(key));
+                            SensitiveConfigUtils.redactValue(key, hadoopOptions.get(key)));
                 }
             }
         }
@@ -132,6 +149,11 @@ public class JindoFileIO extends HadoopCompliantFileIO {
             context.hadoopConf()
                     .iterator()
                     .forEachRemaining(entry -> hadoopOptions.set(entry.getKey(), entry.getValue()));
+        }
+
+        // Resolving a timestamp for every listed directory is expensive in Jindo.
+        if (!hadoopOptions.containsKey(OSS_SHOW_DIR_TIMESTAMP)) {
+            hadoopOptions.set(OSS_SHOW_DIR_TIMESTAMP, "false");
         }
 
         String dlfAccessTrackingExtendedInfo =
@@ -166,6 +188,7 @@ public class JindoFileIO extends HadoopCompliantFileIO {
      * @param opType read/write/meta
      * @return
      */
+    @Override
     public Options hadoopOptions(Path path, String opType) {
         boolean shouldCache = false;
         if (opType.equalsIgnoreCase("read")) {
@@ -193,6 +216,45 @@ public class JindoFileIO extends HadoopCompliantFileIO {
         JindoHadoopSystem fs = pair.getKey();
         return new JindoTwoPhaseOutputStream(
                 new JindoMultiPartUpload(fs, hadoopPath), hadoopPath, path);
+    }
+
+    @Override
+    public String createBlobPresignedUrl(
+            Path tableRoot, BlobDescriptor descriptor, Duration validity) throws IOException {
+        return OSSBlobPresigner.create(blobClient(), tableRoot, descriptor, validity);
+    }
+
+    private synchronized OSSClient blobClient() {
+        if (blobClient == null) {
+            blobClient = createBlobClient(hadoopOptions);
+        }
+        return blobClient;
+    }
+
+    static OSSClient createBlobClient(Options options) {
+        String endpoint = options.get(OSS_ENDPOINT);
+        if (!endpoint.contains("://")) {
+            endpoint = "https://" + endpoint;
+        }
+        String securityToken = options.get(OSS_SECURITY_TOKEN);
+        OSSClientBuilder builder = new OSSClientBuilder();
+        OSSClient client =
+                (OSSClient)
+                        (StringUtils.isNullOrWhitespaceOnly(securityToken)
+                                ? builder.build(
+                                        endpoint,
+                                        options.get(OSS_ACCESS_KEY_ID),
+                                        options.get(OSS_ACCESS_KEY_SECRET))
+                                : builder.build(
+                                        endpoint,
+                                        options.get(OSS_ACCESS_KEY_ID),
+                                        options.get(OSS_ACCESS_KEY_SECRET),
+                                        securityToken));
+        String region = options.get(OSS_REGION);
+        if (!StringUtils.isNullOrWhitespaceOnly(region)) {
+            client.setRegion(region);
+        }
+        return client;
     }
 
     @Override
@@ -243,7 +305,11 @@ public class JindoFileIO extends HadoopCompliantFileIO {
     }
 
     @Override
-    public void close() {
+    public synchronized void close() {
+        if (blobClient != null) {
+            blobClient.shutdown();
+            blobClient = null;
+        }
         if (!allowCache) {
             fsMap.values().stream().map(Pair::getKey).forEach(IOUtils::closeQuietly);
             fsMap.clear();

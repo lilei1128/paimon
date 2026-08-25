@@ -59,18 +59,24 @@ import org.apache.paimon.predicate.GreaterThan;
 import org.apache.paimon.predicate.LeafPredicate;
 import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.predicate.PredicateBuilder;
+import org.apache.paimon.predicate.TopN;
 import org.apache.paimon.predicate.Transform;
 import org.apache.paimon.predicate.UpperTransform;
 import org.apache.paimon.reader.RecordReader;
 import org.apache.paimon.rest.auth.DLFToken;
+import org.apache.paimon.rest.exceptions.AlreadyExistsException;
 import org.apache.paimon.rest.exceptions.BadRequestException;
 import org.apache.paimon.rest.exceptions.ForbiddenException;
+import org.apache.paimon.rest.exceptions.NoSuchResourceException;
 import org.apache.paimon.rest.responses.ConfigResponse;
+import org.apache.paimon.rest.responses.CreatePartitionsResponse;
+import org.apache.paimon.rest.responses.DropPartitionsResponse;
 import org.apache.paimon.rest.responses.GetTagResponse;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.SchemaChange;
 import org.apache.paimon.schema.SchemaManager;
 import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.table.FormatTable;
 import org.apache.paimon.table.Instant;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.table.TableSnapshot;
@@ -83,13 +89,17 @@ import org.apache.paimon.table.sink.CommitMessageImpl;
 import org.apache.paimon.table.sink.StreamTableCommit;
 import org.apache.paimon.table.sink.StreamTableWrite;
 import org.apache.paimon.table.sink.TableWriteImpl;
+import org.apache.paimon.table.source.InnerTableScan;
 import org.apache.paimon.table.source.ReadBuilder;
 import org.apache.paimon.table.source.Split;
 import org.apache.paimon.table.source.TableRead;
+import org.apache.paimon.table.system.SystemTableLoader;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataTypes;
+import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.SnapshotManager;
 import org.apache.paimon.utils.SnapshotNotExistException;
+import org.apache.paimon.utils.StringUtils;
 import org.apache.paimon.view.View;
 import org.apache.paimon.view.ViewChange;
 
@@ -97,16 +107,15 @@ import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableList;
 import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableMap;
 import org.apache.paimon.shade.guava30.com.google.common.collect.Lists;
 import org.apache.paimon.shade.guava30.com.google.common.collect.Maps;
-import org.apache.paimon.shade.org.apache.commons.lang3.StringUtils;
 
 import org.apache.commons.io.FileUtils;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.mockito.Mockito;
 
 import java.io.File;
 import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.util.ArrayList;
@@ -137,6 +146,8 @@ import static org.apache.paimon.CoreOptions.TYPE;
 import static org.apache.paimon.TableType.OBJECT_TABLE;
 import static org.apache.paimon.catalog.Catalog.SYSTEM_DATABASE_NAME;
 import static org.apache.paimon.data.BinaryRow.EMPTY_ROW;
+import static org.apache.paimon.predicate.SortValue.NullOrdering.NULLS_LAST;
+import static org.apache.paimon.predicate.SortValue.SortDirection.DESCENDING;
 import static org.apache.paimon.rest.RESTApi.PAGE_TOKEN;
 import static org.apache.paimon.rest.RESTCatalogOptions.DLF_OSS_ENDPOINT;
 import static org.apache.paimon.rest.RESTCatalogOptions.IO_CACHE_ENABLED;
@@ -279,6 +290,34 @@ public abstract class RESTCatalogTest extends CatalogTestBase {
     }
 
     @Test
+    void testApiWhenViewNoPermission() throws Exception {
+        Identifier identifier = Identifier.create("test_view_db", "no_permission_view");
+        catalog.createDatabase(identifier.getDatabaseName(), false);
+        View view = createView(identifier);
+        catalog.createView(identifier, view, false);
+        revokeViewPermission(identifier);
+        assertThrows(Catalog.ViewNoPermissionException.class, () -> catalog.getView(identifier));
+        assertThrows(
+                Catalog.ViewNoPermissionException.class, () -> catalog.dropView(identifier, false));
+        assertThrows(
+                Catalog.ViewNoPermissionException.class,
+                () ->
+                        catalog.renameView(
+                                identifier,
+                                Identifier.create("test_view_db", "no_permission_view2"),
+                                false));
+        assertThrows(
+                Catalog.ViewNoPermissionException.class,
+                () ->
+                        catalog.alterView(
+                                identifier,
+                                ImmutableList.of(
+                                        ViewChange.addDialect(
+                                                "flink_1", "SELECT * FROM FLINK_TABLE_1")),
+                                false));
+    }
+
+    @Test
     void testApiWhenDatabaseNoExistAndNotIgnore() {
         String database = "test_no_exist_db";
         assertThrows(
@@ -334,6 +373,17 @@ public abstract class RESTCatalogTest extends CatalogTestBase {
         assertThrows(
                 Catalog.TableNoPermissionException.class,
                 () -> catalog.listPartitionsPaged(identifier, 100, null, null));
+        Predicate partitionFilter =
+                new PredicateBuilder(
+                                RowType.of(
+                                        new org.apache.paimon.types.DataType[] {DataTypes.INT()},
+                                        new String[] {"col1"}))
+                        .equal(0, 1);
+        assertThrows(
+                Catalog.TableNoPermissionException.class,
+                () ->
+                        catalog.listPartitionsByFilterPaged(
+                                identifier, partitionFilter, 100, null, null));
         assertThrows(
                 Catalog.TableNoPermissionException.class,
                 () -> restCatalog.createBranch(identifier, "test_branch", null));
@@ -356,6 +406,7 @@ public abstract class RESTCatalogTest extends CatalogTestBase {
                         restCatalog.commitSnapshot(
                                 identifier,
                                 "",
+                                null,
                                 createSnapshotWithMillis(1L, System.currentTimeMillis()),
                                 new ArrayList<PartitionStatistics>()));
     }
@@ -610,6 +661,85 @@ public abstract class RESTCatalogTest extends CatalogTestBase {
         Assertions.assertThrows(
                 BadRequestException.class,
                 () -> catalog.listTableDetailsPaged(databaseName, null, null, "%tale", null));
+    }
+
+    @Test
+    public void testListSystemTablesPaged() throws Exception {
+        String[] systemTableNames =
+                SystemTableLoader.loadGlobalTableNames(options).stream()
+                        .sorted()
+                        .toArray(String[]::new);
+        List<String> allTablePrefixedNames =
+                Arrays.stream(systemTableNames)
+                        .filter(tableName -> tableName.startsWith("all_table"))
+                        .collect(Collectors.toList());
+
+        PagedList<String> pagedTables =
+                catalog.listTablesPaged(SYSTEM_DATABASE_NAME, null, null, null, null);
+        assertThat(pagedTables.getElements()).containsExactly(systemTableNames);
+        assertNull(pagedTables.getNextPageToken());
+
+        pagedTables = catalog.listTablesPaged(SYSTEM_DATABASE_NAME, 1, null, null, null);
+        assertThat(pagedTables.getElements()).containsExactly(systemTableNames[0]);
+        assertEquals(systemTableNames[0], pagedTables.getNextPageToken());
+
+        pagedTables =
+                catalog.listTablesPaged(
+                        SYSTEM_DATABASE_NAME, 1, pagedTables.getNextPageToken(), null, null);
+        assertThat(pagedTables.getElements()).containsExactly(systemTableNames[1]);
+        assertEquals(systemTableNames[1], pagedTables.getNextPageToken());
+
+        pagedTables = catalog.listTablesPaged(SYSTEM_DATABASE_NAME, null, null, "all_table%", null);
+        assertThat(pagedTables.getElements()).containsExactlyElementsOf(allTablePrefixedNames);
+        assertNull(pagedTables.getNextPageToken());
+
+        pagedTables = catalog.listTablesPaged(SYSTEM_DATABASE_NAME, null, null, "catalog_%", null);
+        assertThat(pagedTables.getElements()).isEmpty();
+        assertNull(pagedTables.getNextPageToken());
+
+        pagedTables =
+                catalog.listTablesPaged(
+                        SYSTEM_DATABASE_NAME, null, null, null, TableType.TABLE.toString());
+        assertThat(pagedTables.getElements()).containsExactly(systemTableNames);
+        assertNull(pagedTables.getNextPageToken());
+
+        pagedTables =
+                catalog.listTablesPaged(
+                        SYSTEM_DATABASE_NAME, null, null, null, TableType.OBJECT_TABLE.toString());
+        assertThat(pagedTables.getElements()).isEmpty();
+        assertNull(pagedTables.getNextPageToken());
+
+        PagedList<Table> pagedTableDetails =
+                catalog.listTableDetailsPaged(SYSTEM_DATABASE_NAME, 1, null, null, null);
+        assertPagedTableDetails(pagedTableDetails, 1, systemTableNames[0]);
+        assertEquals(systemTableNames[0], pagedTableDetails.getNextPageToken());
+
+        pagedTableDetails =
+                catalog.listTableDetailsPaged(
+                        SYSTEM_DATABASE_NAME, null, null, "all_table%", TableType.TABLE.toString());
+        assertPagedTableDetails(
+                pagedTableDetails,
+                allTablePrefixedNames.size(),
+                allTablePrefixedNames.toArray(new String[0]));
+        assertNull(pagedTableDetails.getNextPageToken());
+
+        pagedTableDetails =
+                catalog.listTableDetailsPaged(
+                        SYSTEM_DATABASE_NAME, null, null, null, TableType.OBJECT_TABLE.toString());
+        assertThat(pagedTableDetails.getElements()).isEmpty();
+        assertNull(pagedTableDetails.getNextPageToken());
+
+        Assertions.assertThrows(
+                BadRequestException.class,
+                () ->
+                        catalog.listTablesPaged(
+                                SYSTEM_DATABASE_NAME, null, null, "all%tables", null));
+
+        Assertions.assertThrows(
+                BadRequestException.class,
+                () ->
+                        catalog.listTableDetailsPaged(
+                                SYSTEM_DATABASE_NAME, null, null, "all%tables", null));
     }
 
     @Test
@@ -1419,6 +1549,177 @@ public abstract class RESTCatalogTest extends CatalogTestBase {
     }
 
     @Test
+    void testCreatePartitionsForCatalogManagedFormatTablePartitions() throws Exception {
+        Identifier identifier = Identifier.create("format_partition_db", "catalog_partition_table");
+        catalog.createDatabase(identifier.getDatabaseName(), true);
+        catalog.createTable(
+                identifier,
+                Schema.newBuilder()
+                        .option(CoreOptions.TYPE.key(), TableType.FORMAT_TABLE.toString())
+                        .option(METASTORE_PARTITIONED_TABLE.key(), "true")
+                        .option(CoreOptions.FILE_FORMAT.key(), "parquet")
+                        .column("id", DataTypes.INT())
+                        .column("dt", DataTypes.STRING())
+                        .partitionKeys("dt")
+                        .build(),
+                false);
+
+        List<Map<String, String>> partitionSpecs =
+                Arrays.asList(singletonMap("dt", "20260714"), singletonMap("dt", "20260715"));
+        CreatePartitionsResponse response =
+                restCatalog.api().createPartitions(identifier, partitionSpecs, true, null, false);
+
+        assertThat(response.getCreated()).containsExactlyInAnyOrderElementsOf(partitionSpecs);
+        assertThat(response.getExisted()).isEmpty();
+
+        catalog.createPartitions(identifier, partitionSpecs);
+        catalog.createPartitions(identifier, partitionSpecs);
+
+        List<Map<String, String>> conflictingSpecs =
+                Arrays.asList(partitionSpecs.get(0), singletonMap("dt", "20260716"));
+        assertThatThrownBy(
+                        () ->
+                                restCatalog
+                                        .api()
+                                        .createPartitions(
+                                                identifier, conflictingSpecs, false, null, false))
+                .isInstanceOf(AlreadyExistsException.class)
+                .hasMessageContaining("dt=20260714");
+
+        assertThat(catalog.listPartitions(identifier).stream().map(Partition::spec))
+                .containsExactlyInAnyOrderElementsOf(partitionSpecs);
+    }
+
+    @Test
+    void testDropPartitionsForCatalogManagedFormatTablePartitions() throws Exception {
+        Identifier identifier =
+                Identifier.create("format_partition_db", "catalog_partition_drop_table");
+        catalog.createDatabase(identifier.getDatabaseName(), true);
+        catalog.createTable(
+                identifier,
+                Schema.newBuilder()
+                        .option(CoreOptions.TYPE.key(), TableType.FORMAT_TABLE.toString())
+                        .option(METASTORE_PARTITIONED_TABLE.key(), "true")
+                        .option(CoreOptions.FILE_FORMAT.key(), "parquet")
+                        .column("id", DataTypes.INT())
+                        .column("dt", DataTypes.STRING())
+                        .partitionKeys("dt")
+                        .build(),
+                false);
+
+        List<Map<String, String>> partitionSpecs =
+                Arrays.asList(singletonMap("dt", "20260714"), singletonMap("dt", "20260715"));
+        catalog.createPartitions(identifier, partitionSpecs);
+
+        DropPartitionsResponse response =
+                restCatalog
+                        .api()
+                        .dropPartitions(
+                                identifier,
+                                Arrays.asList(
+                                        singletonMap("dt", "20260714"),
+                                        singletonMap("dt", "20260799")),
+                                true);
+        assertThat(response.getDropped()).containsExactly(singletonMap("dt", "20260714"));
+        assertThat(response.getMissing()).containsExactly(singletonMap("dt", "20260799"));
+        assertThat(catalog.listPartitions(identifier).stream().map(Partition::spec))
+                .containsExactly(singletonMap("dt", "20260715"));
+
+        // Catalog contract: dropPartitions ignores non-existent partitions and unregisters
+        // metadata only (no data deletion on the server).
+        catalog.dropPartitions(
+                identifier,
+                Arrays.asList(singletonMap("dt", "20260715"), singletonMap("dt", "20260799")));
+        assertThat(catalog.listPartitions(identifier)).isEmpty();
+
+        assertThatThrownBy(
+                        () ->
+                                restCatalog
+                                        .api()
+                                        .dropPartitions(
+                                                identifier,
+                                                singletonList(singletonMap("dt", "20260799")),
+                                                false))
+                .isInstanceOf(NoSuchResourceException.class)
+                .hasMessageContaining("dt=20260799");
+    }
+
+    @Test
+    void testDropPartitionsLoadsNonManagedTableOnce() throws Exception {
+        Identifier identifier = Identifier.create("test_db", "drop_partition_table");
+        createTable(identifier, emptyMap(), singletonList("col1"));
+        RESTCatalog catalogSpy = Mockito.spy(restCatalog);
+
+        catalogSpy.dropPartitions(identifier, singletonList(singletonMap("col1", "20260717")));
+
+        Mockito.verify(catalogSpy, Mockito.times(1)).getTable(identifier);
+    }
+
+    @Test
+    void testCatalogManagedPartitionCommitAndScanMatchesFileSystemMode() throws Exception {
+        Identifier identifier =
+                Identifier.create("format_partition_db", "catalog_partition_scan_table");
+        catalog.createDatabase(identifier.getDatabaseName(), true);
+        catalog.createTable(
+                identifier,
+                Schema.newBuilder()
+                        .option(CoreOptions.TYPE.key(), TableType.FORMAT_TABLE.toString())
+                        .option(METASTORE_PARTITIONED_TABLE.key(), "true")
+                        .option(CoreOptions.FILE_FORMAT.key(), "csv")
+                        .column("id", DataTypes.INT())
+                        .column("year", DataTypes.INT())
+                        .column("month", DataTypes.INT())
+                        .partitionKeys("year", "month")
+                        .build(),
+                false);
+
+        FormatTable managedTable = (FormatTable) catalog.getTable(identifier);
+        BatchWriteBuilder writeBuilder = managedTable.newBatchWriteBuilder();
+        try (BatchTableWrite write = writeBuilder.newWrite();
+                BatchTableCommit commit = writeBuilder.newCommit()) {
+            write.write(GenericRow.of(1, 2024, 10));
+            write.write(GenericRow.of(2, 2025, 10));
+            write.write(GenericRow.of(3, 2025, 11));
+            commit.commit(write.prepareCommit());
+        }
+
+        List<Map<String, String>> registeredPartitions =
+                Arrays.asList(
+                        ImmutableMap.of("year", "2024", "month", "10"),
+                        ImmutableMap.of("year", "2025", "month", "10"),
+                        ImmutableMap.of("year", "2025", "month", "11"));
+        assertThat(catalog.listPartitions(identifier).stream().map(Partition::spec))
+                .containsExactlyInAnyOrderElementsOf(registeredPartitions);
+        // The table carries the catalog partition metadata its scan reads from.
+        assertThat(managedTable.partitionManager()).isNotNull();
+
+        Map<String, String> fileSystemOptions = new HashMap<>(managedTable.options());
+        fileSystemOptions.put(METASTORE_PARTITIONED_TABLE.key(), "false");
+        FormatTable fileSystemTable =
+                FormatTable.builder()
+                        .fileIO(managedTable.fileIO())
+                        .identifier(Identifier.create("format_partition_db", "filesystem_scan"))
+                        .rowType(managedTable.rowType())
+                        .partitionKeys(managedTable.partitionKeys())
+                        .location(managedTable.location())
+                        .format(managedTable.format())
+                        .options(fileSystemOptions)
+                        .catalogContext(managedTable.catalogContext())
+                        .build();
+
+        Map<String, String> partitionFilter = singletonMap("year", "2025");
+        List<InternalRow> readFromCatalog = read(managedTable, null, null, partitionFilter, null);
+        // Assert the rows themselves first: comparing the two reads alone would also pass if
+        // both stopped returning anything.
+        assertThat(readFromCatalog)
+                .extracting(row -> row.getInt(0) + "," + row.getInt(1) + "," + row.getInt(2))
+                .containsExactlyInAnyOrder("2,2025,10", "3,2025,11");
+        assertThat(readFromCatalog)
+                .containsExactlyInAnyOrderElementsOf(
+                        read(fileSystemTable, null, null, partitionFilter, null));
+    }
+
+    @Test
     void testListPartitions() throws Exception {
         innerTestListPartitions(true);
     }
@@ -1588,6 +1889,96 @@ public abstract class RESTCatalogTest extends CatalogTestBase {
         assertThrows(
                 BadRequestException.class,
                 () -> catalog.listPartitionsPaged(identifier, null, null, "dt=01%01"));
+    }
+
+    @Test
+    public void testListPartitionsByFilterPaged() throws Exception {
+        if (!supportPartitions()) {
+            return;
+        }
+
+        String databaseName = "partitions_filter_db";
+        List<Map<String, String>> partitionSpecs =
+                Arrays.asList(
+                        singletonMap("dt", "20250101"),
+                        singletonMap("dt", "20250102"),
+                        singletonMap("dt", "20250103"),
+                        singletonMap("dt", "20260101"));
+        Schema schema =
+                Schema.newBuilder()
+                        .option(METASTORE_PARTITIONED_TABLE.key(), "true")
+                        .option(METASTORE_TAG_TO_PARTITION.key(), "dt")
+                        .column("col", DataTypes.INT())
+                        .column("dt", DataTypes.STRING())
+                        .partitionKeys("dt")
+                        .build();
+        PredicateBuilder builder =
+                new PredicateBuilder(
+                        RowType.of(
+                                new org.apache.paimon.types.DataType[] {DataTypes.STRING()},
+                                new String[] {"dt"}));
+        Predicate range =
+                PredicateBuilder.and(
+                        builder.greaterOrEqual(0, BinaryString.fromString("20250101")),
+                        builder.lessThan(0, BinaryString.fromString("20260101")));
+        catalog.dropDatabase(databaseName, true, true);
+        catalog.createDatabase(databaseName, true);
+        Identifier identifier = Identifier.create(databaseName, "table");
+        assertThrows(
+                Catalog.TableNotExistException.class,
+                () -> catalog.listPartitionsByFilterPaged(identifier, range, 2, null, "dt=2025%"));
+        catalog.createTable(identifier, schema, true);
+        BatchWriteBuilder writeBuilder = catalog.getTable(identifier).newBatchWriteBuilder();
+        try (BatchTableWrite write = writeBuilder.newWrite();
+                BatchTableCommit commit = writeBuilder.newCommit()) {
+            for (Map<String, String> partitionSpec : partitionSpecs) {
+                write.write(GenericRow.of(0, BinaryString.fromString(partitionSpec.get("dt"))));
+            }
+            commit.commit(write.prepareCommit());
+        }
+
+        String distractorDatabase = databaseName + "_other";
+        catalog.dropDatabase(distractorDatabase, true, true);
+        catalog.createDatabase(distractorDatabase, true);
+        Identifier distractor = Identifier.create(distractorDatabase, identifier.getObjectName());
+        catalog.createTable(distractor, schema, true);
+        catalog.createPartitions(distractor, singletonList(singletonMap("dt", "20250104")));
+
+        // The predicate goes on the wire as its own JSON serialization; the server evaluates
+        // the very same tree the scan would evaluate locally.
+        PagedList<Partition> firstPage =
+                catalog.listPartitionsByFilterPaged(identifier, range, 2, null, "dt=2025%");
+        assertThat(firstPage.getElements())
+                .extracting(partition -> partition.spec().get("dt"))
+                .containsExactly("20250103", "20250102");
+        assertThat(firstPage.getNextPageToken()).isEqualTo("dt=20250102");
+
+        PagedList<Partition> secondPage =
+                catalog.listPartitionsByFilterPaged(
+                        identifier, range, 2, firstPage.getNextPageToken(), "dt=2025%");
+        assertThat(secondPage.getElements())
+                .extracting(partition -> partition.spec().get("dt"))
+                .containsExactly("20250101");
+        assertThat(secondPage.getNextPageToken()).isNull();
+
+        // A predicate the server cannot re-anchor (unknown column) counts as always-true: the
+        // response is a superset of the matching partitions and the client keeps filtering
+        // locally.
+        PredicateBuilder unknownColumn =
+                new PredicateBuilder(
+                        RowType.of(
+                                new org.apache.paimon.types.DataType[] {DataTypes.STRING()},
+                                new String[] {"nope"}));
+        assertThat(
+                        catalog.listPartitionsByFilterPaged(
+                                        identifier,
+                                        unknownColumn.equal(0, BinaryString.fromString("x")),
+                                        null,
+                                        null,
+                                        null)
+                                .getElements())
+                .extracting(Partition::spec)
+                .containsExactlyInAnyOrderElementsOf(partitionSpecs);
     }
 
     @Test
@@ -1848,6 +2239,7 @@ public abstract class RESTCatalogTest extends CatalogTestBase {
                         restCatalog.commitSnapshot(
                                 hasSnapshotTableIdentifier,
                                 "",
+                                null,
                                 createSnapshotWithMillis(1L, System.currentTimeMillis()),
                                 new ArrayList<>()));
 
@@ -1859,6 +2251,7 @@ public abstract class RESTCatalogTest extends CatalogTestBase {
                         restCatalog.commitSnapshot(
                                 hasSnapshotTableIdentifier,
                                 "unknown_id",
+                                null,
                                 createSnapshotWithMillis(1L, System.currentTimeMillis()),
                                 new ArrayList<>()));
 
@@ -1892,6 +2285,39 @@ public abstract class RESTCatalogTest extends CatalogTestBase {
         createTable(noSnapshotTableIdentifier, Maps.newHashMap(), Lists.newArrayList("col1"));
         snapshot = catalog.loadSnapshot(noSnapshotTableIdentifier);
         assertThat(snapshot).isEmpty();
+    }
+
+    @Test
+    void testCommitSnapshotChecksBaseUuid() throws Exception {
+        RESTCatalogServer.commitSuccessThrowException = false;
+        Identifier identifier = Identifier.create("test_db_a", "snapshot_uuid_commit");
+        createTable(identifier, Maps.newHashMap(), Lists.newArrayList("col1"));
+        Table table = catalog.getTable(identifier);
+
+        Snapshot first = createSnapshotWithMillis(1L, System.currentTimeMillis());
+        assertThat(
+                        restCatalog.commitSnapshot(
+                                identifier, table.uuid(), null, first, Collections.emptyList()))
+                .isTrue();
+
+        Snapshot second = createSnapshotWithMillis(2L, System.currentTimeMillis());
+        assertThat(
+                        restCatalog.commitSnapshot(
+                                identifier,
+                                table.uuid(),
+                                "wrong-base-snapshot-uuid",
+                                second,
+                                Collections.emptyList()))
+                .isFalse();
+        assertThat(
+                        restCatalog.commitSnapshot(
+                                identifier,
+                                table.uuid(),
+                                first.uuid(),
+                                second,
+                                Collections.emptyList()))
+                .isTrue();
+        assertThat(restCatalog.loadSnapshot(identifier).get().snapshot()).isEqualTo(second);
     }
 
     @Test
@@ -1934,6 +2360,97 @@ public abstract class RESTCatalogTest extends CatalogTestBase {
     }
 
     @Test
+    public void testRollbackSchema() throws Exception {
+        Identifier identifier = Identifier.create("test_rollback_schema", "table_for_schema");
+        createTable(identifier, Maps.newHashMap(), Lists.newArrayList("col1"));
+
+        // get initial schema id
+        FileStoreTable table = (FileStoreTable) catalog.getTable(identifier);
+        SchemaManager schemaManager = new SchemaManager(table.fileIO(), table.location());
+        long firstSchemaId = schemaManager.latest().get().id();
+
+        // evolve schema
+        catalog.alterTable(identifier, SchemaChange.setOption("aa", "bb"), false);
+        long secondSchemaId = schemaManager.latest().get().id();
+        assertThat(secondSchemaId).isEqualTo(firstSchemaId + 1);
+
+        // rollback schema to first version
+        catalog.rollbackSchema(identifier, firstSchemaId);
+        assertThat(schemaManager.latest().get().id()).isEqualTo(firstSchemaId);
+        assertThat(schemaManager.schemaExists(secondSchemaId)).isFalse();
+
+        // rollback to non-existent schema should fail
+        assertThatThrownBy(() -> catalog.rollbackSchema(identifier, 999))
+                .isInstanceOf(Exception.class);
+    }
+
+    @Test
+    public void testRollbackSchemaFromTable() throws Exception {
+        Identifier identifier =
+                Identifier.create("test_rollback_schema", "table_for_schema_from_table");
+        createTable(identifier, Maps.newHashMap(), Lists.newArrayList("col1"));
+
+        // get initial schema id
+        FileStoreTable table = (FileStoreTable) catalog.getTable(identifier);
+        SchemaManager schemaManager = new SchemaManager(table.fileIO(), table.location());
+        long firstSchemaId = schemaManager.latest().get().id();
+
+        // evolve schema
+        catalog.alterTable(identifier, SchemaChange.setOption("aa", "bb"), false);
+        long secondSchemaId = schemaManager.latest().get().id();
+        assertThat(secondSchemaId).isEqualTo(firstSchemaId + 1);
+
+        // rollback schema to first version
+        table.rollbackSchema(firstSchemaId);
+        assertThat(schemaManager.latest().get().id()).isEqualTo(firstSchemaId);
+        assertThat(schemaManager.schemaExists(secondSchemaId)).isFalse();
+
+        // get schema from new table
+        table = (FileStoreTable) catalog.getTable(identifier);
+        assertThat(table.schema().id()).isEqualTo(1);
+    }
+
+    @Test
+    public void testRollbackSchemaFailedWithSnapshotReference() throws Exception {
+        Identifier identifier =
+                Identifier.create("test_rollback_schema_fail", "table_for_schema_fail");
+        createTable(identifier, Maps.newHashMap(), Lists.newArrayList("col1"));
+
+        FileStoreTable table = (FileStoreTable) catalog.getTable(identifier);
+        SchemaManager schemaManager = new SchemaManager(table.fileIO(), table.location());
+        long firstSchemaId = schemaManager.latest().get().id();
+
+        // write data to create a snapshot referencing firstSchemaId
+        StreamTableWrite write = table.newWrite("commitUser");
+        StreamTableCommit commit = table.newCommit("commitUser");
+        write.write(GenericRow.of(1));
+        commit.commit(0, write.prepareCommit(false, 0));
+        write.close();
+        commit.close();
+
+        // evolve schema
+        catalog.alterTable(identifier, SchemaChange.setOption("aa", "bb"), false);
+        long secondSchemaId = schemaManager.latest().get().id();
+
+        // write data to create a snapshot referencing secondSchemaId
+        table = (FileStoreTable) catalog.getTable(identifier);
+        write = table.newWrite("commitUser");
+        commit = table.newCommit("commitUser");
+        write.write(GenericRow.of(2));
+        commit.commit(1, write.prepareCommit(false, 1));
+        write.close();
+        commit.close();
+
+        // rollback should fail because snapshot references secondSchemaId
+        assertThatThrownBy(() -> catalog.rollbackSchema(identifier, firstSchemaId))
+                .hasMessageContaining("Cannot rollback to schema " + firstSchemaId)
+                .hasMessageContaining(
+                        "schema "
+                                + secondSchemaId
+                                + " is still referenced by snapshots/tags/changelogs");
+    }
+
+    @Test
     public void testDataTokenExpired() throws Exception {
         this.catalog = newRestCatalogWithDataToken();
         Identifier identifier =
@@ -1948,7 +2465,7 @@ public abstract class RESTCatalogTest extends CatalogTestBase {
         FileStoreTable tableTestWrite = (FileStoreTable) catalog.getTable(identifier);
         List<Integer> data = Lists.newArrayList(12);
         Exception exception =
-                assertThrows(UncheckedIOException.class, () -> batchWrite(tableTestWrite, data));
+                assertThrows(RuntimeException.class, () -> batchWrite(tableTestWrite, data));
         assertEquals(RESTTestFileIO.TOKEN_EXPIRED_MSG, exception.getCause().getMessage());
         RESTToken dataToken =
                 new RESTToken(
@@ -1973,7 +2490,7 @@ public abstract class RESTCatalogTest extends CatalogTestBase {
         restTokenFileIO.isObjectStore();
         resetDataTokenOnRestServer(identifier);
         Exception exception =
-                assertThrows(UncheckedIOException.class, () -> batchWrite(tableTestWrite, data));
+                assertThrows(RuntimeException.class, () -> batchWrite(tableTestWrite, data));
         assertEquals(RESTTestFileIO.TOKEN_UN_EXIST_MSG, exception.getCause().getMessage());
     }
 
@@ -2041,6 +2558,7 @@ public abstract class RESTCatalogTest extends CatalogTestBase {
                 Catalog.BranchAlreadyExistException.class,
                 () -> restCatalog.createBranch(identifier, "my_branch", null));
         assertThat(restCatalog.listBranches(identifier)).containsOnly("my_branch");
+
         restCatalog.dropBranch(identifier, "my_branch");
 
         assertThrows(
@@ -2813,7 +3331,8 @@ public abstract class RESTCatalogTest extends CatalogTestBase {
                         Lists.newArrayList(
                                 new DataField(0, "pt", DataTypes.INT()),
                                 new DataField(1, "col1", DataTypes.STRING()),
-                                new DataField(2, "col2", DataTypes.STRING())),
+                                new DataField(2, "col2", DataTypes.STRING()),
+                                new DataField(3, "payload", DataTypes.VARIANT())),
                         Collections.singletonList("pt"),
                         Collections.emptyList(),
                         options,
@@ -2829,6 +3348,8 @@ public abstract class RESTCatalogTest extends CatalogTestBase {
         assertThat(tables).containsExactlyInAnyOrder("table1");
         assertThat(table.uuid()).isNotEmpty();
         assertThat(table.uuid()).isNotEqualTo(table.fullName());
+        assertThat(table.rowType().getField("payload").type())
+                .isInstanceOf(org.apache.paimon.types.VariantType.class);
     }
 
     @Test
@@ -3032,6 +3553,11 @@ public abstract class RESTCatalogTest extends CatalogTestBase {
 
     @Override
     protected boolean supportsAlterDatabase() {
+        return true;
+    }
+
+    @Override
+    protected boolean supportsReplaceTable() {
         return true;
     }
 
@@ -3694,6 +4220,169 @@ public abstract class RESTCatalogTest extends CatalogTestBase {
     }
 
     @Test
+    void testRowFilterWithLimitReadsPastUnauthorizedFiles() throws Exception {
+        Identifier identifier = Identifier.create("test_table_db", "auth_table_limit");
+        catalog.createDatabase(identifier.getDatabaseName(), true);
+
+        List<DataField> fields = new ArrayList<>();
+        fields.add(new DataField(0, "id", DataTypes.INT()));
+        fields.add(new DataField(1, "secret", DataTypes.INT()));
+        catalog.createTable(
+                identifier,
+                new Schema(
+                        fields,
+                        Collections.emptyList(),
+                        Collections.emptyList(),
+                        Collections.singletonMap(QUERY_AUTH_ENABLED.key(), "true"),
+                        ""),
+                true);
+
+        Table table = catalog.getTable(identifier);
+
+        // Two files, each with an authorized (secret=1) and an unauthorized (secret=0) row.
+        commitRows(table, GenericRow.of(1, 1), GenericRow.of(2, 0));
+        commitRows(table, GenericRow.of(3, 1), GenericRow.of(4, 0));
+
+        // secret is a data column, so the filter is enforced at read time, not pushed to the store.
+        LeafPredicate secretFilter =
+                LeafPredicate.of(
+                        new FieldTransform(new FieldRef(1, "secret", DataTypes.INT())),
+                        Equal.INSTANCE,
+                        Collections.singletonList(1));
+        setRowFilter(identifier, Collections.singletonList(secretFilter));
+
+        // The file-store limit must be disabled under the auth filter, else the scan stops at the
+        // first file and misses the authorized row in the second.
+        List<String> result = batchReadWithLimit(table, 1);
+        assertThat(result).contains("+I[1, 1]", "+I[3, 1]");
+    }
+
+    @Test
+    void testRowFilterReadBuilderLimitAfterAuth() throws Exception {
+        Identifier identifier = Identifier.create("test_table_db", "auth_table_read_limit");
+        catalog.createDatabase(identifier.getDatabaseName(), true);
+
+        List<DataField> fields = new ArrayList<>();
+        fields.add(new DataField(0, "id", DataTypes.INT()));
+        fields.add(new DataField(1, "v", DataTypes.INT()));
+        catalog.createTable(
+                identifier,
+                new Schema(
+                        fields,
+                        Collections.emptyList(),
+                        Collections.emptyList(),
+                        Collections.singletonMap(QUERY_AUTH_ENABLED.key(), "true"),
+                        ""),
+                true);
+
+        Table table = catalog.getTable(identifier);
+
+        // Rows 1,2 unauthorized and come first; rows 3,4 authorized.
+        commitRows(
+                table,
+                GenericRow.of(1, 10),
+                GenericRow.of(2, 20),
+                GenericRow.of(3, 30),
+                GenericRow.of(4, 40));
+
+        LeafPredicate idGt2 =
+                LeafPredicate.of(
+                        new FieldTransform(new FieldRef(0, "id", DataTypes.INT())),
+                        GreaterThan.INSTANCE,
+                        Collections.singletonList(2));
+        setRowFilter(identifier, Collections.singletonList(idGt2));
+
+        // withLimit(1) must return exactly one authorized row: skipping the limit returns 2,
+        // applying it before auth returns 0.
+        List<String> result = batchReadWithReadLimit(table, 1);
+        assertThat(result).hasSize(1);
+        assertThat(result.get(0)).isIn("+I[3, 30]", "+I[4, 40]");
+    }
+
+    @Test
+    void testRowFilterReadLimitSkippedWithTopN() throws Exception {
+        Identifier identifier = Identifier.create("test_table_db", "auth_table_read_limit_topn");
+        catalog.createDatabase(identifier.getDatabaseName(), true);
+
+        List<DataField> fields = new ArrayList<>();
+        fields.add(new DataField(0, "id", DataTypes.INT()));
+        fields.add(new DataField(1, "score", DataTypes.INT()));
+        catalog.createTable(
+                identifier,
+                new Schema(
+                        fields,
+                        Collections.emptyList(),
+                        Collections.emptyList(),
+                        Collections.singletonMap(QUERY_AUTH_ENABLED.key(), "true"),
+                        ""),
+                true);
+
+        Table table = catalog.getTable(identifier);
+
+        // Rows 1,2 unauthorized; 3,4 authorized. The highest-sorted authorized row (id=4) is last.
+        commitRows(
+                table,
+                GenericRow.of(1, 10),
+                GenericRow.of(2, 20),
+                GenericRow.of(3, 30),
+                GenericRow.of(4, 40));
+
+        LeafPredicate idGt2 =
+                LeafPredicate.of(
+                        new FieldTransform(new FieldRef(0, "id", DataTypes.INT())),
+                        GreaterThan.INSTANCE,
+                        Collections.singletonList(2));
+        setRowFilter(identifier, Collections.singletonList(idGt2));
+
+        // With a TopN pushed, the read-side limit must be skipped so all authorized rows reach the
+        // engine's ORDER BY; else id=4 (last in scan order) gets truncated.
+        TopN topN = new TopN(new FieldRef(1, "score", DataTypes.INT()), DESCENDING, NULLS_LAST, 1);
+        ReadBuilder readBuilder = table.newReadBuilder().withTopN(topN).withLimit(1);
+        List<String> result = batchRead(table, readBuilder.newScan().plan().splits(), readBuilder);
+        assertThat(result).containsExactlyInAnyOrder("+I[3, 30]", "+I[4, 40]");
+    }
+
+    @Test
+    void testRowFilterWithTopNKeepsAuthorizedSplits() throws Exception {
+        Identifier identifier = Identifier.create("test_table_db", "auth_table_topn");
+        catalog.createDatabase(identifier.getDatabaseName(), true);
+
+        // Partitioned so each row is its own split; TopN pruning works at split granularity.
+        List<DataField> fields = new ArrayList<>();
+        fields.add(new DataField(0, "pt", DataTypes.INT()));
+        fields.add(new DataField(1, "score", DataTypes.INT()));
+        fields.add(new DataField(2, "secret", DataTypes.INT()));
+        catalog.createTable(
+                identifier,
+                new Schema(
+                        fields,
+                        Collections.singletonList("pt"),
+                        Collections.emptyList(),
+                        Collections.singletonMap(QUERY_AUTH_ENABLED.key(), "true"),
+                        ""),
+                true);
+
+        Table table = catalog.getTable(identifier);
+
+        // The split with the highest score is unauthorized; the authorized row has a lower score.
+        commitRows(table, GenericRow.of(1, 100, 0));
+        commitRows(table, GenericRow.of(2, 50, 1));
+
+        LeafPredicate secretFilter =
+                LeafPredicate.of(
+                        new FieldTransform(new FieldRef(2, "secret", DataTypes.INT())),
+                        Equal.INSTANCE,
+                        Collections.singletonList(1));
+        setRowFilter(identifier, Collections.singletonList(secretFilter));
+
+        // ORDER BY score DESC LIMIT 1: TopN split pruning must be disabled under the auth filter,
+        // else it keeps the top unauthorized split and drops the authorized row.
+        TopN topN = new TopN(new FieldRef(1, "score", DataTypes.INT()), DESCENDING, NULLS_LAST, 1);
+        List<String> result = batchReadWithTopN(table, topN);
+        assertThat(result).contains("+I[2, 50, 1]");
+    }
+
+    @Test
     public void testConflictRollback() throws Exception {
         doTestConflictRollback(false);
     }
@@ -3822,6 +4511,8 @@ public abstract class RESTCatalogTest extends CatalogTestBase {
 
     protected abstract void revokeTablePermission(Identifier identifier);
 
+    protected abstract void revokeViewPermission(Identifier identifier);
+
     protected abstract void authTableColumns(Identifier identifier, List<String> columns);
 
     protected abstract void revokeDatabasePermission(String database);
@@ -3860,9 +4551,46 @@ public abstract class RESTCatalogTest extends CatalogTestBase {
         commit.close();
     }
 
+    protected void commitRows(Table table, GenericRow... rows) throws Exception {
+        BatchWriteBuilder writeBuilder = table.newBatchWriteBuilder();
+        BatchTableWrite write = writeBuilder.newWrite();
+        for (GenericRow row : rows) {
+            write.write(row);
+        }
+        BatchTableCommit commit = writeBuilder.newCommit();
+        commit.commit(write.prepareCommit());
+        write.close();
+        commit.close();
+    }
+
     protected List<String> batchRead(Table table) throws IOException {
-        ReadBuilder readBuilder = table.newReadBuilder();
-        List<Split> splits = readBuilder.newScan().plan().splits();
+        return batchRead(table, table.newReadBuilder().newScan().plan().splits());
+    }
+
+    protected List<String> batchReadWithLimit(Table table, int limit) throws IOException {
+        // Limit only the scan (file pruning), not the read, so the result reflects the kept files.
+        InnerTableScan scan = (InnerTableScan) table.newReadBuilder().newScan();
+        return batchRead(table, scan.withLimit(limit).plan().splits());
+    }
+
+    protected List<String> batchReadWithTopN(Table table, TopN topN) throws IOException {
+        // Apply TopN only on the scan (split pruning), so the result reflects the kept splits.
+        InnerTableScan scan = (InnerTableScan) table.newReadBuilder().newScan();
+        return batchRead(table, scan.withTopN(topN).plan().splits());
+    }
+
+    protected List<String> batchReadWithReadLimit(Table table, int limit) throws IOException {
+        // Exercises the ReadBuilder.withLimit path, which limits both the scan and the read side.
+        ReadBuilder readBuilder = table.newReadBuilder().withLimit(limit);
+        return batchRead(table, readBuilder.newScan().plan().splits(), readBuilder);
+    }
+
+    private List<String> batchRead(Table table, List<Split> splits) throws IOException {
+        return batchRead(table, splits, table.newReadBuilder());
+    }
+
+    private List<String> batchRead(Table table, List<Split> splits, ReadBuilder readBuilder)
+            throws IOException {
         TableRead read = readBuilder.newRead();
         RecordReader<InternalRow> reader = read.createReader(splits);
         List<String> result = new ArrayList<>();

@@ -21,6 +21,7 @@ package org.apache.paimon.spark;
 import org.apache.paimon.spark.procedure.AlterFunctionProcedure;
 import org.apache.paimon.spark.procedure.AlterViewDialectProcedure;
 import org.apache.paimon.spark.procedure.ClearConsumersProcedure;
+import org.apache.paimon.spark.procedure.CompactChainTableProcedure;
 import org.apache.paimon.spark.procedure.CompactDatabaseProcedure;
 import org.apache.paimon.spark.procedure.CompactManifestProcedure;
 import org.apache.paimon.spark.procedure.CompactProcedure;
@@ -39,14 +40,19 @@ import org.apache.paimon.spark.procedure.ExpireSnapshotsProcedure;
 import org.apache.paimon.spark.procedure.ExpireTagsProcedure;
 import org.apache.paimon.spark.procedure.FastForwardProcedure;
 import org.apache.paimon.spark.procedure.MarkPartitionDoneProcedure;
+import org.apache.paimon.spark.procedure.MaterializeDeletionVectorsProcedure;
+import org.apache.paimon.spark.procedure.MergeBranchProcedure;
 import org.apache.paimon.spark.procedure.MigrateDatabaseProcedure;
 import org.apache.paimon.spark.procedure.MigrateTableProcedure;
 import org.apache.paimon.spark.procedure.Procedure;
 import org.apache.paimon.spark.procedure.ProcedureBuilder;
 import org.apache.paimon.spark.procedure.PurgeFilesProcedure;
+import org.apache.paimon.spark.procedure.ReassignRowIdProcedure;
 import org.apache.paimon.spark.procedure.RemoveOrphanFilesProcedure;
 import org.apache.paimon.spark.procedure.RemoveUnexistingFilesProcedure;
+import org.apache.paimon.spark.procedure.RenameBranchProcedure;
 import org.apache.paimon.spark.procedure.RenameTagProcedure;
+import org.apache.paimon.spark.procedure.RepairEarliestSnapshotProcedure;
 import org.apache.paimon.spark.procedure.RepairProcedure;
 import org.apache.paimon.spark.procedure.ReplaceTagProcedure;
 import org.apache.paimon.spark.procedure.RescaleProcedure;
@@ -98,8 +104,12 @@ public class SparkProcedures {
         procedureBuilders.put("create_global_index", CreateGlobalIndexProcedure::builder);
         procedureBuilders.put("drop_global_index", DropGlobalIndexProcedure::builder);
         procedureBuilders.put("delete_branch", DeleteBranchProcedure::builder);
+        procedureBuilders.put("rename_branch", RenameBranchProcedure::builder);
         procedureBuilders.put("compact", CompactProcedure::builder);
+        procedureBuilders.put(
+                "materialize_deletion_vectors", MaterializeDeletionVectorsProcedure::builder);
         procedureBuilders.put("compact_database", CompactDatabaseProcedure::builder);
+        procedureBuilders.put("compact_chain_table", CompactChainTableProcedure::builder);
         procedureBuilders.put("rescale", RescaleProcedure::builder);
         procedureBuilders.put("migrate_database", MigrateDatabaseProcedure::builder);
         procedureBuilders.put("migrate_table", MigrateTableProcedure::builder);
@@ -108,7 +118,9 @@ public class SparkProcedures {
         procedureBuilders.put("expire_snapshots", ExpireSnapshotsProcedure::builder);
         procedureBuilders.put("expire_partitions", ExpirePartitionsProcedure::builder);
         procedureBuilders.put("repair", RepairProcedure::builder);
+        procedureBuilders.put("repair_earliest_snapshot", RepairEarliestSnapshotProcedure::builder);
         procedureBuilders.put("fast_forward", FastForwardProcedure::builder);
+        procedureBuilders.put("merge_branch", MergeBranchProcedure::builder);
         procedureBuilders.put("reset_consumer", ResetConsumerProcedure::builder);
         procedureBuilders.put("mark_partition_done", MarkPartitionDoneProcedure::builder);
         procedureBuilders.put("compact_manifest", CompactManifestProcedure::builder);
@@ -121,6 +133,7 @@ public class SparkProcedures {
                 "trigger_tag_automatic_creation", TriggerTagAutomaticCreationProcedure::builder);
         procedureBuilders.put("rewrite_file_index", RewriteFileIndexProcedure::builder);
         procedureBuilders.put("copy", CopyFilesProcedure::builder);
+        procedureBuilders.put("reassign_row_id", ReassignRowIdProcedure::builder);
         return procedureBuilders.build();
     }
 }

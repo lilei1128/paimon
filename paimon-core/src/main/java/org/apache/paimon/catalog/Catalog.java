@@ -27,9 +27,11 @@ import org.apache.paimon.function.Function;
 import org.apache.paimon.function.FunctionChange;
 import org.apache.paimon.partition.Partition;
 import org.apache.paimon.partition.PartitionStatistics;
+import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.rest.responses.GetTagResponse;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.SchemaChange;
+import org.apache.paimon.table.CatalogEnvironment;
 import org.apache.paimon.table.Instant;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.table.TableSnapshot;
@@ -358,6 +360,25 @@ public interface Catalog extends AutoCloseable {
         alterTable(identifier, Collections.singletonList(change), ignoreIfNotExists);
     }
 
+    /**
+     * Replace an existing table with a new {@link Schema}.
+     *
+     * <p>For compatible FileStore tables, it truncates visible data and appends a new schema to the
+     * schema chain, preserving old schemas and snapshots for time travel. Other table kinds may
+     * fall back to drop-and-create behavior.
+     *
+     * @param identifier path of the table to be replaced
+     * @param newSchema the new {@link Schema}
+     * @param ignoreIfNotExists if true, do nothing when the table does not exist
+     * @throws TableNotExistException if the table does not exist and {@code ignoreIfNotExists} is
+     *     false
+     */
+    default void replaceTable(Identifier identifier, Schema newSchema, boolean ignoreIfNotExists)
+            throws TableNotExistException {
+        throw new UnsupportedOperationException(
+                "Catalog " + getClass().getName() + " does not support replaceTable.");
+    }
+
     // ======================= partition methods ===============================
 
     /**
@@ -403,6 +424,32 @@ public interface Catalog extends AutoCloseable {
             @Nullable String pageToken,
             @Nullable String partitionNamePattern)
             throws TableNotExistException;
+
+    /**
+     * Get a page of partitions using {@code predicate} as a best-effort filter.
+     *
+     * <p>The result may be a superset — an implementation must never exclude a partition it cannot
+     * prove non-matching — so callers must evaluate {@code predicate} again. Continue pagination
+     * while {@link PagedList#getNextPageToken()} is non-empty, even if a page has no elements.
+     *
+     * @param identifier path of the table
+     * @param predicate partition predicate
+     * @param maxResults maximum page size, or {@code null}/0 to use the catalog default
+     * @param pageToken token returned by the previous page, or {@code null} for the first page
+     * @param partitionNamePattern optional SQL LIKE prefix pattern (%) for partition names,
+     *     conjunctive with {@code predicate}
+     * @return a page of candidate partitions
+     * @throws TableNotExistException if the table does not exist
+     */
+    default PagedList<Partition> listPartitionsByFilterPaged(
+            Identifier identifier,
+            Predicate predicate,
+            @Nullable Integer maxResults,
+            @Nullable String pageToken,
+            @Nullable String partitionNamePattern)
+            throws TableNotExistException {
+        return listPartitionsPaged(identifier, maxResults, pageToken, partitionNamePattern);
+    }
 
     /**
      * Get Partition list by partition names of the table.
@@ -479,7 +526,8 @@ public interface Catalog extends AutoCloseable {
      * @param pageToken Optional parameter indicating the next page token allows list to be start
      *     from a specific point.
      * @param viewNamePattern A sql LIKE pattern (%) for view names. All views will be returned if
-     *     not set or empty. Currently, only prefix matching is supported.
+     *     not set or empty. Whether full LIKE semantics or only prefix matching is supported is
+     *     catalog-specific; the default implementation ignores the pattern.
      * @return a list of the names of views with provided page size in this database and next page
      *     token, or a list of the names of all views in this database if the catalog does not
      *     {@link #supportsListObjectsPaged()}.
@@ -506,7 +554,8 @@ public interface Catalog extends AutoCloseable {
      * @param pageToken Optional parameter indicating the next page token allows list to be start
      *     from a specific point.
      * @param viewNamePattern A sql LIKE pattern (%) for view names. All view details will be
-     *     returned if not set or empty. Currently, only prefix matching is supported.
+     *     returned if not set or empty. Whether full LIKE semantics or only prefix matching is
+     *     supported is catalog-specific; the default implementation ignores the pattern.
      * @return a list of the view details with provided page size (@param maxResults) in this
      *     database and next page token, or a list of the details of all views in this database if
      *     the catalog does not {@link #supportsListObjectsPaged()}.
@@ -632,7 +681,10 @@ public interface Catalog extends AutoCloseable {
 
     /**
      * Whether this catalog supports name pattern filter when list objects paged. If not,
-     * corresponding methods will throw exception if name pattern provided.
+     * corresponding methods will throw exception if name pattern provided. This flag is a
+     * catalog-wide default consulted by the base implementations; a specific list method may still
+     * honor a pattern by overriding the method directly (in which case it need not rely on this
+     * flag).
      *
      * <ul>
      *   <li>{@link #listDatabasesPaged(Integer, String, String)}.
@@ -658,11 +710,12 @@ public interface Catalog extends AutoCloseable {
      * will throw an {@link UnsupportedOperationException}, affect the following methods:
      *
      * <ul>
-     *   <li>{@link #commitSnapshot(Identifier, String, Snapshot, List)}.
+     *   <li>{@link #commitSnapshot(Identifier, String, String, Snapshot, List)}.
      *   <li>{@link #loadSnapshot(Identifier)}.
      *   <li>{@link #rollbackTo(Identifier, Instant)}.
      *   <li>{@link #createBranch(Identifier, String, String)}.
      *   <li>{@link #dropBranch(Identifier, String)}.
+     *   <li>{@link #renameBranch(Identifier, String, String)}.
      *   <li>{@link #listBranches(Identifier)}.
      *   <li>{@link #getTag(Identifier, String)}.
      *   <li>{@link #createTag(Identifier, String, Long, String, boolean)}.
@@ -677,6 +730,7 @@ public interface Catalog extends AutoCloseable {
      *
      * @param identifier Path of the table
      * @param tableUuid Uuid of the table to avoid wrong commit
+     * @param baseSnapshotUuid Uuid of the snapshot on which the commit is based
      * @param snapshot Snapshot to be committed
      * @param statistics statistics information of this change
      * @return Success or not
@@ -687,6 +741,7 @@ public interface Catalog extends AutoCloseable {
     boolean commitSnapshot(
             Identifier identifier,
             @Nullable String tableUuid,
+            @Nullable String baseSnapshotUuid,
             Snapshot snapshot,
             List<PartitionStatistics> statistics)
             throws Catalog.TableNotExistException;
@@ -810,6 +865,22 @@ public interface Catalog extends AutoCloseable {
             throws Catalog.TableNotExistException;
 
     /**
+     * Rollback table schema to a specific schema version. All schema versions greater than the
+     * target will be deleted. This operation will fail if any snapshot, tag, or changelog
+     * references a schema version greater than the target.
+     *
+     * @param identifier path of the table
+     * @param schemaId the target schema version to rollback to
+     * @throws Catalog.TableNotExistException if the table does not exist
+     * @throws UnsupportedOperationException if the catalog does not {@link
+     *     #supportsVersionManagement()}
+     */
+    default void rollbackSchema(Identifier identifier, long schemaId)
+            throws Catalog.TableNotExistException {
+        throw new UnsupportedOperationException();
+    }
+
+    /**
      * Create a new branch for this table. By default, an empty branch will be created using the
      * latest schema. If you provide {@code #fromTag}, a branch will be created from the tag and the
      * data files will be inherited from it.
@@ -858,6 +929,20 @@ public interface Catalog extends AutoCloseable {
      *     #supportsVersionManagement()}
      */
     void dropBranch(Identifier identifier, String branch) throws BranchNotExistException;
+
+    /**
+     * Rename a branch for this table.
+     *
+     * @param identifier path of the table, cannot be system or branch name.
+     * @param fromBranch the source branch name
+     * @param toBranch the target branch name
+     * @throws BranchNotExistException if the source branch doesn't exist
+     * @throws BranchAlreadyExistException if the target branch already exists
+     * @throws UnsupportedOperationException if the catalog does not {@link
+     *     #supportsVersionManagement()}
+     */
+    void renameBranch(Identifier identifier, String fromBranch, String toBranch)
+            throws BranchNotExistException, BranchAlreadyExistException;
 
     /**
      * Fast-forward a branch to main branch.
@@ -956,21 +1041,23 @@ public interface Catalog extends AutoCloseable {
     // ==================== Partition Modifications ==========================
 
     /**
-     * Whether this catalog supports partition modification for tables.
+     * Whether committing a table through this catalog maintains that table's partitions in the
+     * catalog.
      *
-     * <p>If not, following methods will do nothing:
+     * <p>What this gates is the handler a table is given: {@link
+     * CatalogEnvironment#partitionModification()} is null for a catalog that says false, so the
+     * commits of a table loaded from it register, alter and drop nothing. It does not disable the
+     * methods themselves, which is how a Format Table with catalog-managed partitions registers
+     * what a commit wrote even though its catalog reports false here:
      *
      * <ul>
      *   <li>{@link #createPartitions(Identifier, List)}.
      *   <li>{@link #alterPartitions(Identifier, List)}.
-     * </ul>
-     *
-     * <p>If not, following method will be exactly the same as directly using {@link
-     * BatchTableCommit#truncatePartitions}:
-     *
-     * <ul>
      *   <li>{@link #dropPartitions(Identifier, List)}.
      * </ul>
+     *
+     * <p>A catalog that keeps no partitions of its own inherits defaults that match: creating and
+     * altering do nothing, and dropping is exactly {@link BatchTableCommit#truncatePartitions}.
      */
     boolean supportsPartitionModification();
 
@@ -983,6 +1070,45 @@ public interface Catalog extends AutoCloseable {
      */
     default void createPartitions(Identifier identifier, List<Map<String, String>> partitions)
             throws TableNotExistException {}
+
+    /**
+     * Create partitions of the specify table, with explicit existence semantics and optionally
+     * reporting statistics for them in the same call.
+     *
+     * <p>The statistics are matched to {@code partitions} by {@link PartitionStatistics#spec()}, so
+     * they may cover only some of them, and {@code replaceStatistics} says whether they replace
+     * what the catalog already holds or add to it. What decides whether they survive is whether a
+     * catalog overrides this method: one that does not registers the partitions exactly as {@link
+     * #createPartitions(Identifier, List)} does and drops the report, however much of it the
+     * catalog could have stored, and for a catalog that keeps no partitions at all that means it
+     * does nothing.
+     *
+     * @param identifier path of the table to create partitions
+     * @param partitions partitions to be created
+     * @param ignoreIfExists if false, fail when any partition already exists and apply none of the
+     *     batch; if true, behave like {@link #createPartitions(Identifier, List)}
+     * @param statistics statistics to report, or null to report none
+     * @param replaceStatistics whether the report replaces the stored values rather than adding to
+     *     them; ignored when {@code statistics} is null
+     * @throws TableNotExistException if the table does not exist
+     * @throws UnsupportedOperationException if {@code ignoreIfExists} is false and the catalog does
+     *     not implement strict creation, which is what the default here does
+     */
+    default void createPartitions(
+            Identifier identifier,
+            List<Map<String, String>> partitions,
+            boolean ignoreIfExists,
+            @Nullable List<PartitionStatistics> statistics,
+            boolean replaceStatistics)
+            throws TableNotExistException {
+        if (!ignoreIfExists) {
+            throw new UnsupportedOperationException(
+                    String.format(
+                            "Catalog %s does not support createPartitions without ignoreIfExists.",
+                            getClass().getName()));
+        }
+        createPartitions(identifier, partitions);
+    }
 
     /**
      * Drop partitions of the specify table. Ignore non-existent partitions.
@@ -1399,6 +1525,33 @@ public interface Catalog extends AutoCloseable {
 
         public String getTableId() {
             return tableId;
+        }
+    }
+
+    /** Exception for trying to operate on the view that doesn't have permission. */
+    class ViewNoPermissionException extends RuntimeException {
+
+        private static final String MSG = "View %s has no permission. Caused by %s.";
+
+        private final Identifier identifier;
+
+        public ViewNoPermissionException(Identifier identifier, Throwable cause) {
+            super(
+                    String.format(
+                            MSG,
+                            identifier.getFullName(),
+                            cause != null && cause.getMessage() != null ? cause.getMessage() : ""),
+                    cause);
+            this.identifier = identifier;
+        }
+
+        @VisibleForTesting
+        public ViewNoPermissionException(Identifier identifier) {
+            this(identifier, null);
+        }
+
+        public Identifier identifier() {
+            return identifier;
         }
     }
 

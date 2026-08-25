@@ -21,6 +21,7 @@ package org.apache.paimon.types;
 import org.apache.paimon.annotation.Public;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.table.SpecialFields;
+import org.apache.paimon.utils.MathUtils;
 import org.apache.paimon.utils.Preconditions;
 import org.apache.paimon.utils.StringUtils;
 
@@ -68,6 +69,8 @@ public final class RowType extends DataType {
 
     private transient volatile Map<Integer, DataField> laziedFieldIdToField;
     private transient volatile Map<Integer, Integer> laziedFieldIdToIndex;
+
+    private transient volatile Set<Integer> laziedBlobFieldIndices;
 
     public RowType(boolean isNullable, List<DataField> fields) {
         super(isNullable, DataTypeRoot.ROW);
@@ -120,6 +123,22 @@ public final class RowType extends DataType {
         return projection;
     }
 
+    /** Returns the indices of top-level BLOB fields. */
+    public Set<Integer> getBlobFieldIndices() {
+        Set<Integer> blobFieldIndices = this.laziedBlobFieldIndices;
+        if (blobFieldIndices == null) {
+            Set<Integer> indices = new HashSet<>();
+            for (int i = 0; i < fields.size(); i++) {
+                if (fields.get(i).type().getTypeRoot() == DataTypeRoot.BLOB) {
+                    indices.add(i);
+                }
+            }
+            blobFieldIndices = Collections.unmodifiableSet(indices);
+            this.laziedBlobFieldIndices = blobFieldIndices;
+        }
+        return blobFieldIndices;
+    }
+
     public boolean containsField(String fieldName) {
         return nameToField().containsKey(fieldName);
     }
@@ -158,7 +177,9 @@ public final class RowType extends DataType {
 
     @Override
     public int defaultSize() {
-        return fields.stream().mapToInt(f -> f.type().defaultSize()).sum();
+        return fields.stream()
+                .mapToInt(f -> f.type().defaultSize())
+                .reduce(0, MathUtils::addSafely);
     }
 
     @Override

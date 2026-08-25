@@ -152,7 +152,7 @@ public class TestChangelogDataReadWrite {
                         FileFormatDiscover.of(options),
                         pathFactory,
                         options);
-        return new KeyValueTableRead(() -> read, () -> rawFileRead, null);
+        return new KeyValueTableRead(() -> read, () -> rawFileRead, schema, options, null);
     }
 
     public <T> List<DataFileMeta> writeFiles(
@@ -193,6 +193,7 @@ public class TestChangelogDataReadWrite {
                         (coreOptions, format) -> pathFactory,
                         snapshotManager,
                         null, // not used, we only create an empty writer
+                        null,
                         null,
                         null,
                         options,

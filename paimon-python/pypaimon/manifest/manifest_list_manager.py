@@ -1,20 +1,19 @@
-################################################################################
-#  Licensed to the Apache Software Foundation (ASF) under one
-#  or more contributor license agreements.  See the NOTICE file
-#  distributed with this work for additional information
-#  regarding copyright ownership.  The ASF licenses this file
-#  to you under the Apache License, Version 2.0 (the
-#  "License"); you may not use this file except in compliance
-#  with the License.  You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-#      http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-# limitations under the License.
-################################################################################
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 from io import BytesIO
 from typing import List, Optional
@@ -33,11 +32,13 @@ class ManifestListManager:
 
     def __init__(self, table):
         from pypaimon.table.file_store_table import FileStoreTable
+        from pypaimon.manifest import avro_codec
 
         self.table: FileStoreTable = table
         manifest_path = table.table_path.rstrip('/')
         self.manifest_path = f"{manifest_path}/manifest"
         self.file_io = self.table.file_io
+        self._codec = avro_codec(table.options.manifest_compression())
 
     def read_all(self, snapshot: Optional[Snapshot]) -> List[ManifestFileMeta]:
         """Read base + delta manifest lists for full file state."""
@@ -125,7 +126,9 @@ class ManifestListManager:
         list_path = f"{self.manifest_path}/{file_name}"
         try:
             buffer = BytesIO()
-            fastavro.writer(buffer, MANIFEST_FILE_META_SCHEMA, avro_records)
+            fastavro.writer(
+                buffer, MANIFEST_FILE_META_SCHEMA, avro_records,
+                codec=self._codec)
             avro_bytes = buffer.getvalue()
             with self.file_io.new_output_stream(list_path) as output_stream:
                 output_stream.write(avro_bytes)

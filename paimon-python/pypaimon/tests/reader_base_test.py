@@ -1,20 +1,19 @@
-################################################################################
-#  Licensed to the Apache Software Foundation (ASF) under one
-#  or more contributor license agreements.  See the NOTICE file
-#  distributed with this work for additional information
-#  regarding copyright ownership.  The ASF licenses this file
-#  to you under the Apache License, Version 2.0 (the
-#  "License"); you may not use this file except in compliance
-#  with the License.  You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-#      http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-# limitations under the License.
-################################################################################
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 import glob
 import os
@@ -28,6 +27,7 @@ from unittest.mock import Mock
 
 import pandas as pd
 import pyarrow as pa
+import pytest
 from parameterized import parameterized
 
 from pypaimon import CatalogFactory, Schema
@@ -38,7 +38,6 @@ from pypaimon.manifest.schema.simple_stats import SimpleStats
 from pypaimon.schema.data_types import (ArrayType, AtomicType, DataField,
                                         MapType, PyarrowFieldParser)
 from pypaimon.schema.table_schema import TableSchema
-from pypaimon.snapshot.snapshot_manager import SnapshotManager
 from pypaimon.table.row.generic_row import GenericRow, GenericRowDeserializer
 from pypaimon.write.file_store_commit import FileStoreCommit
 
@@ -163,6 +162,72 @@ class ReaderBasicTest(unittest.TestCase):
         pd.testing.assert_frame_equal(
             actual_df2.reset_index(drop=True), df2.reset_index(drop=True))
 
+    def test_dynamic_partition_overwrite(self):
+        pa_schema = pa.schema([
+            ('f0', pa.string()),
+            ('f1', pa.string())
+        ])
+        schema = Schema.from_pyarrow_schema(pa_schema, partition_keys=['f0'])
+        self.catalog.create_table('default.test_dynamic_overwrite', schema, False)
+        table = self.catalog.get_table('default.test_dynamic_overwrite')
+        read_builder = table.new_read_builder()
+
+        # Write initial non-null and null partitions
+        self._batch_write(table, pd.DataFrame({
+            'f0': ['a', 'b', None],
+            'f1': ['apple', 'banana', 'cherry'],
+        }))
+
+        # Dynamic overwrite partition f0='a' only; 'b' and null untouched
+        self._batch_overwrite(table, pd.DataFrame({
+            'f0': ['a'],
+            'f1': ['watermelon'],
+        }))
+
+        self._assert_table_equals(read_builder, pd.DataFrame({
+            'f0': ['a', 'b', None],
+            'f1': ['watermelon', 'banana', 'cherry'],
+        }), sort_by='f0')
+
+        # Dynamic overwrite partitions f0='a' and f0=None; 'b' untouched
+        self._batch_overwrite(table, pd.DataFrame({
+            'f0': ['a', None],
+            'f1': ['mango', 'grape'],
+        }))
+
+        self._assert_table_equals(read_builder, pd.DataFrame({
+            'f0': ['a', 'b', None],
+            'f1': ['mango', 'banana', 'grape'],
+        }), sort_by='f0')
+
+    def _batch_write(self, table, df):
+        write_builder = table.new_batch_write_builder()
+        table_write = write_builder.new_write()
+        table_commit = write_builder.new_commit()
+        table_write.write_pandas(df)
+        table_commit.commit(table_write.prepare_commit())
+        table_write.close()
+        table_commit.close()
+
+    def _batch_overwrite(self, table, df, partition=None):
+        write_builder = table.new_batch_write_builder().overwrite(partition)
+        table_write = write_builder.new_write()
+        table_commit = write_builder.new_commit()
+        table_write.write_pandas(df)
+        table_commit.commit(table_write.prepare_commit())
+        table_write.close()
+        table_commit.close()
+
+    def _assert_table_equals(self, read_builder, expected_df, sort_by=None):
+        table_scan = read_builder.new_scan()
+        table_read = read_builder.new_read()
+        actual_df = table_read.to_pandas(table_scan.plan().splits())
+        if sort_by:
+            actual_df = actual_df.sort_values(by=sort_by)
+        pd.testing.assert_frame_equal(
+            actual_df.reset_index(drop=True), expected_df.reset_index(drop=True))
+
+    @pytest.mark.python_plan
     def test_full_data_types(self):
         simple_pa_schema = pa.schema([
             ('f0', pa.int8()),
@@ -223,10 +288,15 @@ class ReaderBasicTest(unittest.TestCase):
 
         # assert equal
         actual_data = table_read.to_arrow(splits)
-        self.assertEqual(actual_data, expect_data)
+        # BINARY(N) maps to variable-length binary on read (see #7518), so the
+        # fixed-size f9 column normalizes to binary; reflect that in the expected.
+        f9_index = expect_data.schema.get_field_index('f9')
+        expected_data = expect_data.set_column(
+            f9_index, 'f9', expect_data.column('f9').cast(pa.binary()))
+        self.assertEqual(actual_data, expected_data)
 
         # to test GenericRow ability
-        latest_snapshot = SnapshotManager(table).get_latest_snapshot()
+        latest_snapshot = table.snapshot_manager().get_latest_snapshot()
         manifest_files = table_scan.file_scanner.manifest_list_manager.read_all(latest_snapshot)
         manifest_entries = table_scan.file_scanner.manifest_file_manager.read(
             manifest_files[0].file_name, lambda row: table_scan.file_scanner._filter_manifest_entry(row), False)
@@ -295,6 +365,44 @@ class ReaderBasicTest(unittest.TestCase):
         actual = duckdb_con.query("SELECT * FROM duckdb_table").fetchdf()
         expect = pd.DataFrame(self.raw_data)
         pd.testing.assert_frame_equal(actual.reset_index(drop=True), expect.reset_index(drop=True))
+
+    def test_reader_duckDB_parallelism(self):
+        # A dedicated partitioned table with rows across multiple partitions so
+        # scan planning yields >= 2 splits, exercising the real parallel fan-out
+        # path (``_should_run_parallel`` requires parallelism >= 2 AND
+        # splits >= 2).
+        schema = Schema.from_pyarrow_schema(self.pa_schema, partition_keys=['dt'])
+        self.catalog.create_table('default.test_duckdb_parallel', schema, False)
+        table = self.catalog.get_table('default.test_duckdb_parallel')
+        write_builder = table.new_batch_write_builder()
+        table_write = write_builder.new_write()
+        table_commit = write_builder.new_commit()
+        table_write.write_arrow(pa.Table.from_pydict({
+            'user_id': [1, 2, 3, 4, 5, 6],
+            'item_id': [1001, 1002, 1003, 1004, 1005, 1006],
+            'behavior': ['a', 'b', 'c', 'd', 'e', 'f'],
+            'dt': ['p1', 'p1', 'p2', 'p2', 'p3', 'p3'],
+        }, schema=self.pa_schema))
+        table_commit.commit(table_write.prepare_commit())
+        table_write.close()
+        table_commit.close()
+
+        read_builder = table.new_read_builder()
+        splits = read_builder.new_scan().plan().splits()
+        self.assertGreaterEqual(len(splits), 2)
+
+        serial = read_builder.new_read().to_duckdb(
+            splits, 'duckdb_serial', parallelism=1)
+        parallel = read_builder.new_read().to_duckdb(
+            splits, 'duckdb_parallel', parallelism=4)
+
+        serial_df = serial.query(
+            "SELECT * FROM duckdb_serial ORDER BY item_id").fetchdf()
+        parallel_df = parallel.query(
+            "SELECT * FROM duckdb_parallel ORDER BY item_id").fetchdf()
+        pd.testing.assert_frame_equal(
+            serial_df.reset_index(drop=True),
+            parallel_df.reset_index(drop=True))
 
     def test_mixed_add_and_delete_entries_compute_stats(self):
         """Test record_count calculation with mixed ADD/DELETE entries in same partition."""
@@ -517,7 +625,7 @@ class ReaderBasicTest(unittest.TestCase):
 
         pk_read_builder = pk_table.new_read_builder()
         pk_table_scan = pk_read_builder.new_scan()
-        latest_snapshot = SnapshotManager(pk_table).get_latest_snapshot()
+        latest_snapshot = pk_table.snapshot_manager().get_latest_snapshot()
         pk_manifest_files = pk_table_scan.file_scanner.manifest_list_manager.read_all(latest_snapshot)
         pk_manifest_entries = pk_table_scan.file_scanner.manifest_file_manager.read(
             pk_manifest_files[0].file_name,
@@ -592,7 +700,7 @@ class ReaderBasicTest(unittest.TestCase):
 
         read_builder = table.new_read_builder()
         table_scan = read_builder.new_scan()
-        latest_snapshot = SnapshotManager(table).get_latest_snapshot()
+        latest_snapshot = table.snapshot_manager().get_latest_snapshot()
         manifest_files = table_scan.file_scanner.manifest_list_manager.read_all(latest_snapshot)
         manifest_entries = table_scan.file_scanner.manifest_file_manager.read(
             manifest_files[0].file_name,
@@ -645,7 +753,7 @@ class ReaderBasicTest(unittest.TestCase):
             DataField(5, "f5", AtomicType('DOUBLE'), 'desc'),
             DataField(6, "f6", AtomicType('BOOLEAN'), 'desc'),
             DataField(7, "f7", AtomicType('STRING'), 'desc'),
-            DataField(8, "f8", AtomicType('BINARY(12)'), 'desc'),
+            DataField(8, "f8", AtomicType('BYTES'), 'desc'),
             DataField(9, "f9", AtomicType('DECIMAL(10, 6)'), 'desc'),
             DataField(10, "f10", AtomicType('BYTES'), 'desc'),
             DataField(11, "f11", AtomicType('DATE'), 'desc'),
@@ -1105,7 +1213,7 @@ class ReaderBasicTest(unittest.TestCase):
         # Read manifest to verify value_stats_cols is None (all fields included)
         read_builder = table.new_read_builder()
         table_scan = read_builder.new_scan()
-        latest_snapshot = SnapshotManager(table).get_latest_snapshot()
+        latest_snapshot = table.snapshot_manager().get_latest_snapshot()
         manifest_files = table_scan.file_scanner.manifest_list_manager.read_all(latest_snapshot)
         manifest_entries = table_scan.file_scanner.manifest_file_manager.read(
             manifest_files[0].file_name,

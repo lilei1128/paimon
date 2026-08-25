@@ -258,6 +258,8 @@ public class LocalOrphanFilesClean extends OrphanFilesClean {
             }
 
             return files.stream()
+                    .filter(status -> !status.isDir())
+                    .filter(status -> !isManagedBlobPack(status.getPath()))
                     .filter(this::oldEnough)
                     .map(status -> Pair.of(status.getPath(), status.getLen()))
                     .collect(Collectors.toList());

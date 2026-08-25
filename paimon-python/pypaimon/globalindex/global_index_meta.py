@@ -1,20 +1,19 @@
-################################################################################
-#  Licensed to the Apache Software Foundation (ASF) under one
-#  or more contributor license agreements.  See the NOTICE file
-#  distributed with this work for additional information
-#  regarding copyright ownership.  The ASF licenses this file
-#  to you under the Apache License, Version 2.0 (the
-#  "License"); you may not use this file except in compliance
-#  with the License.  You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-#      http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-# limitations under the License.
-################################################################################
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 """Global index metadata."""
 
@@ -31,6 +30,7 @@ class GlobalIndexMeta:
     index_field_id: int
     extra_field_ids: Optional[List[int]] = None
     index_meta: Optional[bytes] = None
+    source_meta: Optional[bytes] = None
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, GlobalIndexMeta):
@@ -40,7 +40,8 @@ class GlobalIndexMeta:
             self.row_range_end == other.row_range_end and
             self.index_field_id == other.index_field_id and
             self.extra_field_ids == other.extra_field_ids and
-            self.index_meta == other.index_meta
+            self.index_meta == other.index_meta and
+            self.source_meta == other.source_meta
         )
 
     def __hash__(self) -> int:
@@ -49,7 +50,9 @@ class GlobalIndexMeta:
             self.row_range_start,
             self.row_range_end,
             self.index_field_id,
-            extra_ids_tuple
+            extra_ids_tuple,
+            self.index_meta,
+            self.source_meta,
         ))
 
 
@@ -60,6 +63,11 @@ class GlobalIndexIOMeta:
     file_name: str
     file_size: int
     metadata: Optional[bytes] = None
+    # Optional full path, mirrors Java IndexFileMeta.externalPath(). When set,
+    # readers should open this path directly instead of joining the caller's
+    # index_path with file_name (Java FileStorePathFactory#toPath prefers
+    # externalPath over indexPath/fileName).
+    external_path: Optional[str] = None
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, GlobalIndexIOMeta):
@@ -67,8 +75,9 @@ class GlobalIndexIOMeta:
         return (
             self.file_name == other.file_name and
             self.file_size == other.file_size and
-            self.metadata == other.metadata
+            self.metadata == other.metadata and
+            self.external_path == other.external_path
         )
 
     def __hash__(self) -> int:
-        return hash((self.file_name, self.file_size))
+        return hash((self.file_name, self.file_size, self.external_path))

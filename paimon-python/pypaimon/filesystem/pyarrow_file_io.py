@@ -1,27 +1,27 @@
-################################################################################
-#  Licensed to the Apache Software Foundation (ASF) under one
-#  or more contributor license agreements.  See the NOTICE file
-#  distributed with this work for additional information
-#  regarding copyright ownership.  The ASF licenses this file
-#  to you under the Apache License, Version 2.0 (the
-#  "License"); you may not use this file except in compliance
-#  with the License.  You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-#      http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-# limitations under the License.
-################################################################################
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
 import logging
 import os
 import re
 import subprocess
-import uuid
+import threading
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any, Dict, List, Optional
 from urllib.parse import splitport, urlparse
 
@@ -30,15 +30,14 @@ import pyarrow.fs as pafs
 from packaging.version import parse
 from pyarrow._fs import FileSystem
 
-from pypaimon.common.file_io import FileIO
+from pypaimon.common.file_io import FileIO, create_temp_path
 from pypaimon.common.options import Options
-from pypaimon.common.options.config import OssOptions, S3Options
+from pypaimon.common.options.config import OssOptions, S3Options, SecurityOptions
+from pypaimon.common.options.options_utils import OptionsUtils
 from pypaimon.common.uri_reader import UriReaderFactory
+from pypaimon.filesystem.jindo_file_system_handler import JindoFileSystemHandler, JINDO_AVAILABLE
 from pypaimon.schema.data_types import (AtomicType, DataField,
                                         PyarrowFieldParser)
-from pypaimon.table.row.blob import Blob, BlobData, BlobDescriptor
-from pypaimon.table.row.generic_row import GenericRow
-from pypaimon.table.row.row_kind import RowKind
 from pypaimon.write.blob_format_writer import BlobFormatWriter
 
 
@@ -50,21 +49,56 @@ class PyArrowFileIO(FileIO):
     def __init__(self, path: str, catalog_options: Options):
         self.properties = catalog_options
         self.logger = logging.getLogger(__name__)
-        self._pyarrow_gte_7 = not _pyarrow_lt_7()
         self._pyarrow_gte_8 = parse(pyarrow.__version__) >= parse("8.0.0")
+        # force_virtual_addressing landed in PyArrow 16; below it the OSS bucket
+        # goes into endpoint_override, so keys must omit it (init + path share
+        # this flag so they can't drift).
+        self._pyarrow_gte_16 = parse(pyarrow.__version__) >= parse("16.0.0")
+        self._oss_bucket_in_endpoint = not self._pyarrow_gte_16
         scheme, netloc, _ = self.parse_location(path)
         self.uri_reader_factory = UriReaderFactory(catalog_options)
         self._is_oss = scheme in {"oss"}
         self._oss_bucket = None
+        _oss_impl = self.properties.get(OssOptions.OSS_IMPL)
+        self._use_jindo = False
+        self._legacy_bucket_checked = False
+        self._legacy_bucket_error = None
+        self._legacy_bucket_lock = threading.Lock()
+
         if self._is_oss:
             self._oss_bucket = self._extract_oss_bucket(path)
-            self.filesystem = self._initialize_oss_fs(path)
+            if _oss_impl not in ("jindo", "legacy"):
+                raise ValueError(
+                    f"Unsupported fs.oss.impl value: '{_oss_impl}'. "
+                    f"Supported values are 'jindo' and 'legacy'.")
+            if _oss_impl == "legacy":
+                self.filesystem = self._initialize_oss_fs(path)
+            elif JINDO_AVAILABLE:
+                self.filesystem = self._initialize_jindo_fs(path)
+            else:
+                self.logger.info(
+                    "fs.oss.impl is 'jindo' but pyjindosdk is not installed. "
+                    "Falling back to legacy PyArrow S3FileSystem implementation. "
+                    "Install pyjindosdk for better performance: pip install pyjindosdk")
+                self.filesystem = self._initialize_oss_fs(path)
         elif scheme in {"s3", "s3a", "s3n"}:
             self.filesystem = self._initialize_s3_fs()
         elif scheme in {"hdfs", "viewfs"}:
             self.filesystem = self._initialize_hdfs_fs(scheme, netloc)
+        elif scheme == "gs":
+            self.filesystem = self._initialize_gcs_fs()
         else:
             raise ValueError(f"Unrecognized filesystem type in URI: {scheme}")
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        # threading.Lock cannot be pickled; recreated in __setstate__.
+        state.pop("_legacy_bucket_lock", None)
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._legacy_bucket_lock = threading.Lock()
 
     @staticmethod
     def parse_location(location: str):
@@ -96,6 +130,35 @@ class PyArrowFileIO(FileIO):
         else:
             return {}
 
+    def _get_property(self, *keys: str):
+        data = self.properties.to_map()
+        for key in keys:
+            if key in data:
+                return data[key]
+        return None
+
+    @staticmethod
+    def _s3_key_variants(*names: str):
+        prefixes = ["s3.", "s3a.", "fs.s3.", "fs.s3a."]
+        for prefix in prefixes:
+            for name in names:
+                yield prefix + name
+
+    def _get_s3_property(self, name: str, legacy_key: str = None):
+        keys = []
+        if legacy_key:
+            keys.append(legacy_key)
+        keys.extend(self._s3_key_variants(name))
+        return self._get_property(*keys)
+
+    def _get_s3_boolean_property(self, name: str) -> bool:
+        value = self._get_s3_property(name)
+        if value is None:
+            return False
+        if isinstance(value, bool):
+            return value
+        return OptionsUtils.convert_to_boolean(value)
+
     def _extract_oss_bucket(self, location) -> str:
         uri = urlparse(location)
         if uri.scheme and uri.scheme != "oss":
@@ -116,7 +179,22 @@ class PyArrowFileIO(FileIO):
             raise ValueError("Invalid OSS URI without bucket: {}".format(location))
         return bucket
 
+    def _initialize_jindo_fs(self, path) -> FileSystem:
+        """Initialize JindoFileSystem for OSS access."""
+        self.logger.info(f"Initializing JindoFileSystem for OSS access: {path}")
+        root_path = f"oss://{self._oss_bucket}/"
+        fs_handler = JindoFileSystemHandler(root_path, self.properties)
+        self._use_jindo = True
+        return pafs.PyFileSystem(fs_handler)
+
     def _initialize_oss_fs(self, path) -> FileSystem:
+        if self.properties.get(OssOptions.OSS_ACCESS_KEY_ID):
+            # When explicit credentials are provided, disable the EC2 Instance Metadata
+            # Service (IMDS) probe to avoid multi-second timeouts in non-AWS environments.
+            # Uses setdefault so that an explicit user setting is never overridden.
+            # Note: this is process-wide and affects all AWS SDK clients.
+            os.environ.setdefault("AWS_EC2_METADATA_DISABLED", "true")
+
         client_kwargs = {
             "access_key": self.properties.get(OssOptions.OSS_ACCESS_KEY_ID),
             "secret_key": self.properties.get(OssOptions.OSS_ACCESS_KEY_SECRET),
@@ -124,7 +202,7 @@ class PyArrowFileIO(FileIO):
             "region": self.properties.get(OssOptions.OSS_REGION),
         }
 
-        if self._pyarrow_gte_7:
+        if not self._oss_bucket_in_endpoint:
             client_kwargs['force_virtual_addressing'] = True
             client_kwargs['endpoint_override'] = self.properties.get(OssOptions.OSS_ENDPOINT)
         else:
@@ -137,15 +215,39 @@ class PyArrowFileIO(FileIO):
         return pafs.S3FileSystem(**client_kwargs)
 
     def _initialize_s3_fs(self) -> FileSystem:
+        access_key = self._get_property(
+            S3Options.S3_ACCESS_KEY_ID.key(),
+            *self._s3_key_variants("access-key", "access.key"))
+        secret_key = self._get_property(
+            S3Options.S3_ACCESS_KEY_SECRET.key(),
+            *self._s3_key_variants("secret-key", "secret.key"))
+        session_token = self._get_property(
+            S3Options.S3_SECURITY_TOKEN.key(),
+            *self._s3_key_variants(
+                "session-token", "session.token",
+                "security-token", "security.token"))
+        endpoint = self._get_s3_property("endpoint", S3Options.S3_ENDPOINT.key())
+        region = self._get_s3_property("region", S3Options.S3_REGION.key())
+
+        if access_key:
+            # When explicit credentials are provided, disable the EC2 Instance Metadata
+            # Service (IMDS) probe to avoid multi-second timeouts in non-AWS environments.
+            # Uses setdefault so that an explicit user setting is never overridden.
+            # Note: this is process-wide and affects all AWS SDK clients.
+            os.environ.setdefault("AWS_EC2_METADATA_DISABLED", "true")
+
         client_kwargs = {
-            "endpoint_override": self.properties.get(S3Options.S3_ENDPOINT),
-            "access_key": self.properties.get(S3Options.S3_ACCESS_KEY_ID),
-            "secret_key": self.properties.get(S3Options.S3_ACCESS_KEY_SECRET),
-            "session_token": self.properties.get(S3Options.S3_SECURITY_TOKEN),
-            "region": self.properties.get(S3Options.S3_REGION),
+            "endpoint_override": endpoint,
+            "access_key": access_key,
+            "secret_key": secret_key,
+            "session_token": session_token,
+            "region": region,
         }
-        if self._pyarrow_gte_7:
-            client_kwargs["force_virtual_addressing"] = True
+        if self._pyarrow_gte_16:
+            path_style_access = (
+                self._get_s3_boolean_property("path-style-access") or
+                self._get_s3_boolean_property("path.style.access"))
+            client_kwargs["force_virtual_addressing"] = not path_style_access
 
         retry_config = self._create_s3_retry_config()
         client_kwargs.update(retry_config)
@@ -170,12 +272,87 @@ class PyArrowFileIO(FileIO):
         )
         os.environ['CLASSPATH'] = class_paths.stdout.strip()
 
-        host, port_str = splitport(netloc)
-        return pafs.HadoopFileSystem(
-            host=host,
-            port=int(port_str),
-            user=os.environ.get('HADOOP_USER_NAME', 'hadoop')
-        )
+        principal = (self.properties.get(SecurityOptions.KERBEROS_PRINCIPAL)
+                     or self._get_property("security.principal"))
+        keytab = (self.properties.get(SecurityOptions.KERBEROS_KEYTAB)
+                  or self._get_property("security.keytab"))
+        use_ticket_cache = self.properties.get(SecurityOptions.KERBEROS_USE_TICKET_CACHE)
+
+        if bool(principal) != bool(keytab):
+            raise ValueError(
+                "security.kerberos.login.principal and security.kerberos.login.keytab "
+                "must be both set or both unset")
+
+        # Resolve (host, port) for pafs.HadoopFileSystem.
+        # - ViewFS URIs delegate to fs.defaultFS (host='default') so libhdfs
+        #   resolves the mount table from core-site.xml.
+        # - HDFS HA URIs carry a nameservice without a port; also delegate to
+        #   fs.defaultFS to avoid int(None) on the missing port.
+        # - Explicit "host:port" URIs connect directly.
+        if scheme == 'viewfs' or not netloc:
+            host, port = 'default', 0
+        else:
+            parsed_host, port_str = splitport(netloc)
+            if port_str is None:
+                host, port = 'default', 0
+            else:
+                host, port = parsed_host, int(port_str)
+
+        kerb_ticket = None
+        if principal and keytab:
+            self._kerberos_login_from_keytab(principal, keytab)
+            kerb_ticket = self._get_ticket_cache_path()
+            if not kerb_ticket:
+                raise RuntimeError(
+                    "kinit succeeded but no ticket cache path could be determined. "
+                    "Set the KRB5CCNAME environment variable to specify the cache location.")
+        elif use_ticket_cache:
+            cache_path = self._get_ticket_cache_path()
+            if cache_path and os.path.exists(cache_path):
+                kerb_ticket = cache_path
+
+        if kerb_ticket:
+            return pafs.HadoopFileSystem(host=host, port=port, kerb_ticket=kerb_ticket)
+        else:
+            return pafs.HadoopFileSystem(
+                host=host,
+                port=port,
+                user=os.environ.get('HADOOP_USER_NAME', 'hadoop')
+            )
+
+    def _initialize_gcs_fs(self) -> FileSystem:
+        if not hasattr(pafs, 'GcsFileSystem'):
+            raise ImportError(
+                "GCS filesystem support requires PyArrow built with GCS support. "
+                "Please upgrade PyArrow or install a version with GCS enabled."
+            )
+
+        access_token = self._get_property("gcs.access-token")
+        token_expiry = self._get_property("gcs.access-token.expiration")
+        project_id = self._get_property("gcs.project-id")
+
+        kwargs = {}
+        if access_token:
+            from datetime import datetime
+            kwargs["access_token"] = access_token
+            kwargs["credential_token_expiration"] = (
+                datetime.fromisoformat(token_expiry) if token_expiry
+                else datetime(9999, 12, 31)
+            )
+        if project_id:
+            kwargs["project_id"] = project_id
+
+        return pafs.GcsFileSystem(**kwargs)
+
+    @staticmethod
+    def _kerberos_login_from_keytab(principal: str, keytab: str):
+        from pypaimon.filesystem import _kerberos
+        _kerberos.kerberos_login_from_keytab(principal, keytab)
+
+    @staticmethod
+    def _get_ticket_cache_path() -> Optional[str]:
+        from pypaimon.filesystem import _kerberos
+        return _kerberos.get_ticket_cache_path()
 
     def new_input_stream(self, path: str):
         path_str = self.to_filesystem_path(path)
@@ -184,8 +361,10 @@ class PyArrowFileIO(FileIO):
     def new_output_stream(self, path: str):
         path_str = self.to_filesystem_path(path)
 
-        if self._is_oss and not self._pyarrow_gte_7:
-            # For PyArrow 6.x + OSS, path_str is already just the key part
+        if self._use_jindo:
+            pass
+        elif self._is_oss and self._oss_bucket_in_endpoint:
+            # OSS with bucket baked into endpoint: path_str is already the key
             if '/' in path_str:
                 parent_dir = '/'.join(path_str.split('/')[:-1])
             else:
@@ -194,7 +373,7 @@ class PyArrowFileIO(FileIO):
             if parent_dir and not self.exists(parent_dir):
                 self.mkdirs(parent_dir)
         else:
-            parent_dir = Path(path_str).parent
+            parent_dir = PurePosixPath(path_str).parent
             if str(parent_dir) and not self.exists(str(parent_dir)):
                 self.mkdirs(str(parent_dir))
 
@@ -222,6 +401,11 @@ class PyArrowFileIO(FileIO):
         return file_info
 
     def list_status(self, path: str):
+        if self._legacy_oss_mode():
+            raise RuntimeError(
+                "Listing OSS directories is not supported with PyArrow < 16 "
+                "(it parses the first key segment as a bucket). Upgrade to "
+                "pyarrow >= 16, or install pyjindosdk and set fs.oss.impl=jindo.")
         path_str = self.to_filesystem_path(path)
         selector = pafs.FileSelector(path_str, recursive=False, allow_not_found=True)
         return self.filesystem.get_file_info(selector)
@@ -230,7 +414,16 @@ class PyArrowFileIO(FileIO):
         file_infos = self.list_status(path)
         return [info for info in file_infos if info.type == pafs.FileType.Directory]
 
+    def _legacy_oss_mode(self) -> bool:
+        """OSS in bucket-in-endpoint mode (PyArrow < 16): paths are key-only
+        (the bucket is embedded in endpoint_override), but PyArrow still
+        parses the first key segment as a bucket, so bucket-level operations
+        target the wrong bucket."""
+        return self._is_oss and self._oss_bucket_in_endpoint and not self._use_jindo
+
     def exists(self, path: str) -> bool:
+        # Legacy OSS mode limitation: directories always report NotFound
+        # (see _legacy_oss_mode); plain objects are probed correctly.
         path_str = self.to_filesystem_path(path)
         return self._get_file_info(path_str).type != pafs.FileType.NotFound
 
@@ -272,20 +465,62 @@ class PyArrowFileIO(FileIO):
         path_str = self.to_filesystem_path(path)
         file_info = self._get_file_info(path_str)
 
-        if file_info.type == pafs.FileType.NotFound:
-            self.filesystem.create_dir(path_str, recursive=True)
-            return True
         if file_info.type == pafs.FileType.Directory:
             return True
-        elif file_info.type == pafs.FileType.File:
+        if file_info.type == pafs.FileType.File:
             raise FileExistsError(f"Path exists but is not a directory: {path}")
+
+        if self._legacy_oss_mode():
+            # create_dir would CreateBucket the first key segment and corrupt
+            # the parent directory; object stores need no directories. Only
+            # validate that the real bucket exists.
+            self._check_legacy_bucket_exists()
+            return True
 
         self.filesystem.create_dir(path_str, recursive=True)
         return True
 
+    def _check_legacy_bucket_exists(self):
+        """Raise if the real OSS bucket does not exist (legacy mode only).
+
+        PyArrow < 16 folds NoSuchBucket into the same NotFound as a missing
+        key, so probe the bucket root anonymously, at most once per
+        instance (the lock serializes concurrent writers). Reject only on
+        an OSS NoSuchBucket error body - a bare 404 may come from a proxy
+        or custom endpoint. Any probe setup or transport failure
+        (Requests-only TLS/proxy settings do not apply to PyArrow's S3
+        client) is indeterminate: fail open."""
+        with self._legacy_bucket_lock:
+            if not self._legacy_bucket_checked:
+                self._legacy_bucket_error = self._probe_legacy_bucket()
+                self._legacy_bucket_checked = True
+            if self._legacy_bucket_error:
+                raise OSError(self._legacy_bucket_error)
+
+    def _probe_legacy_bucket(self) -> Optional[str]:
+        """Return an error message if the bucket definitely does not exist."""
+        import requests
+
+        endpoint = self.properties.get(OssOptions.OSS_ENDPOINT) or ""
+        scheme, _, host = endpoint.rpartition("://")
+        url = f"{scheme or 'https'}://{self._oss_bucket}.{host}/"
+        try:
+            response = requests.get(url, timeout=5, allow_redirects=False, stream=True)
+            try:
+                status = response.status_code
+                body = next(response.iter_content(2048), b"") if status == 404 else b""
+            finally:
+                response.close()
+        except (requests.RequestException, OSError):
+            return None
+        if status == 404 and b"NoSuchBucket" in body:
+            return (f"OSS bucket '{self._oss_bucket}' does not exist "
+                    f"(NoSuchBucket from {url})")
+        return None
+
     def rename(self, src: str, dst: str) -> bool:
         dst_str = self.to_filesystem_path(dst)
-        dst_parent = Path(dst_str).parent
+        dst_parent = PurePosixPath(dst_str).parent
         if str(dst_parent) and not self.exists(str(dst_parent)):
             self.mkdirs(str(dst_parent))
 
@@ -301,8 +536,8 @@ class PyArrowFileIO(FileIO):
                     return False
                 # Make it compatible with HadoopFileIO: if dst is an existing directory,
                 # dst=dst/srcFileName
-                src_name = Path(src_str).name
-                dst_str = str(Path(dst_str) / src_name)
+                src_name = PurePosixPath(src_str).name
+                dst_str = str(PurePosixPath(dst_str) / src_name)
                 final_dst_info = self._get_file_info(dst_str)
                 if final_dst_info.type != pafs.FileType.NotFound:
                     return False
@@ -345,7 +580,7 @@ class PyArrowFileIO(FileIO):
             if file_info.type == pafs.FileType.Directory:
                 return False
 
-        temp_path = path + str(uuid.uuid4()) + ".tmp"
+        temp_path = create_temp_path(path)
         success = False
         try:
             self.write_file(temp_path, content, False)
@@ -361,7 +596,7 @@ class PyArrowFileIO(FileIO):
 
         source_str = self.to_filesystem_path(source_path)
         target_str = self.to_filesystem_path(target_path)
-        target_parent = Path(target_str).parent
+        target_parent = PurePosixPath(target_str).parent
 
         if str(target_parent) and not self.exists(str(target_parent)):
             self.mkdirs(str(target_parent))
@@ -392,15 +627,13 @@ class PyArrowFileIO(FileIO):
             (which is 3, see https://github.com/facebook/zstd/blob/dev/programs/zstdcli.c)
             instead of the specified level.
             """
-            import sys
-
             import pyarrow.orc as orc
 
             data = self._cast_time_columns_for_orc(data)
 
             with self.new_output_stream(path) as output_stream:
-                # Check Python version - if 3.6, don't use compression parameter
-                if sys.version_info[:2] == (3, 6):
+                # ORC compression= was added in PyArrow 7.0; PyArrow 6 lacks it.
+                if _pyarrow_lt_7():
                     orc.write_table(data, output_stream, **kwargs)
                 else:
                     orc.write_table(
@@ -480,13 +713,52 @@ class PyArrowFileIO(FileIO):
             self.delete_quietly(path)
             raise RuntimeError(f"Failed to write Lance file {path}: {e}") from e
 
+    def write_mosaic(self, path: str, data: pyarrow.Table, **kwargs):
+        try:
+            import mosaic
+            with self.new_output_stream(path) as output_stream:
+                mosaic.write_table(data, output_stream, options=kwargs.get("options"))
+        except Exception as e:
+            self.delete_quietly(path)
+            raise RuntimeError(f"Failed to write Mosaic file {path}: {e}") from e
+
+    def write_vortex(self, path: str, data: pyarrow.Table, **kwargs):
+        try:
+            import vortex
+            from vortex import store
+
+            from pypaimon.read.reader.vortex_utils import to_vortex_specified
+            file_path_for_vortex, store_kwargs = to_vortex_specified(self, path)
+
+            if store_kwargs:
+                vortex_store = store.from_url(file_path_for_vortex, **store_kwargs)
+                vortex_store.write(vortex.array(data))
+            else:
+                from vortex._lib.io import write as vortex_write
+                vortex_write(vortex.array(data), file_path_for_vortex)
+        except Exception as e:
+            self.delete_quietly(path)
+            raise RuntimeError(f"Failed to write Vortex file {path}: {e}") from e
+
+    def write_row(self, path: str, data: pyarrow.Table, fields=None, zstd_level: int = 1, **kwargs):
+        try:
+            from pypaimon.write.writer.format_row_writer import FormatRowWriter
+
+            if fields is None:
+                fields = PyarrowFieldParser.to_paimon_schema(data.schema)
+
+            with self.new_output_stream(path) as output_stream:
+                writer = FormatRowWriter(output_stream, fields, zstd_level=zstd_level)
+                writer.write_table(data)
+                writer.close()
+        except Exception as e:
+            self.delete_quietly(path)
+            raise RuntimeError(f"Failed to write row file {path}: {e}") from e
+
     def write_blob(self, path: str, data: pyarrow.Table, **kwargs):
         try:
             if data.num_columns != 1:
                 raise RuntimeError(f"Blob format only supports a single column, got {data.num_columns} columns")
-            column = data.column(0)
-            if column.null_count > 0:
-                raise RuntimeError("Blob format does not support null values")
             field = data.schema[0]
             if pyarrow.types.is_large_binary(field.type):
                 fields = [DataField(0, field.name, AtomicType("BLOB"))]
@@ -499,31 +771,7 @@ class PyArrowFileIO(FileIO):
             with self.new_output_stream(path) as output_stream:
                 writer = BlobFormatWriter(output_stream)
                 for i in range(num_rows):
-                    col_data = records_dict[field_name][i]
-                    if hasattr(fields[0].type, 'type') and fields[0].type.type == "BLOB":
-                        if hasattr(col_data, 'as_py'):
-                            col_data = col_data.as_py()
-                        if isinstance(col_data, str):
-                            col_data = col_data.encode('utf-8')
-                        if isinstance(col_data, bytearray):
-                            col_data = bytes(col_data)
-
-                        if isinstance(col_data, bytes):
-                            if BlobDescriptor.is_blob_descriptor(col_data):
-                                descriptor = BlobDescriptor.deserialize(col_data)
-                                uri_reader = self.uri_reader_factory.create(descriptor.uri)
-                                blob_data = Blob.from_descriptor(uri_reader, descriptor)
-                            else:
-                                blob_data = BlobData(col_data)
-                        else:
-                            raise RuntimeError(
-                                "Blob field value must be bytes/blob or serialized BlobDescriptor bytes."
-                            )
-                        row_values = [blob_data]
-                    else:
-                        row_values = [col_data]
-                    row = GenericRow(row_values, fields, RowKind.INSERT)
-                    writer.add_element(row)
+                    writer.write_value(records_dict[field_name][i], fields, self.uri_reader_factory)
                 writer.close()
 
         except Exception as e:
@@ -546,12 +794,17 @@ class PyArrowFileIO(FileIO):
             path_part = normalized_path.lstrip('/')
             return f"{drive_letter}:/{path_part}" if path_part else f"{drive_letter}:"
 
+        if self._use_jindo:
+            # For JindoFileSystem, pass key only
+            path_part = normalized_path.lstrip('/')
+            return path_part if path_part else '.'
+
         if isinstance(self.filesystem, S3FileSystem):
             if parsed.scheme:
                 if parsed.netloc:
                     path_part = normalized_path.lstrip('/')
-                    # OSS+PyArrow<7: endpoint_override has bucket, pass key only.
-                    if self._is_oss and not self._pyarrow_gte_7:
+                    # OSS with bucket baked into endpoint: pass key only.
+                    if self._is_oss and self._oss_bucket_in_endpoint:
                         return path_part if path_part else '.'
                     result = f"{parsed.netloc}/{path_part}" if path_part else parsed.netloc
                     return result
@@ -560,6 +813,16 @@ class PyArrowFileIO(FileIO):
                     return result if result else '.'
             else:
                 return str(path)
+
+        try:
+            from pyarrow.fs import GcsFileSystem
+        except ImportError:
+            GcsFileSystem = None
+        if GcsFileSystem is not None and isinstance(self.filesystem, GcsFileSystem):
+            if parsed.scheme and parsed.netloc:
+                path_part = normalized_path.lstrip('/')
+                return f"{parsed.netloc}/{path_part}" if path_part else parsed.netloc
+            return str(path)
 
         if parsed.scheme:
             if not normalized_path:

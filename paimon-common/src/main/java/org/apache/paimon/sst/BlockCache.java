@@ -20,18 +20,20 @@ package org.apache.paimon.sst;
 
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.fs.SeekableInputStream;
+import org.apache.paimon.fs.VectoredReadable;
 import org.apache.paimon.io.cache.CacheKey;
 import org.apache.paimon.io.cache.CacheManager;
 import org.apache.paimon.io.cache.CacheManager.SegmentContainer;
 import org.apache.paimon.memory.MemorySegment;
+import org.apache.paimon.utils.ExceptionUtils;
 import org.apache.paimon.utils.IOUtils;
 
 import java.io.Closeable;
 import java.io.IOException;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 
 /** Cache for block reading. */
@@ -46,13 +48,19 @@ public class BlockCache implements Closeable {
         this.filePath = filePath;
         this.input = input;
         this.cacheManager = cacheManager;
-        this.blocks = new HashMap<>();
+        this.blocks = new ConcurrentHashMap<>();
     }
 
     private byte[] readFrom(long offset, int length) throws IOException {
         byte[] buffer = new byte[length];
-        input.seek(offset);
-        IOUtils.readFully(input, buffer);
+        if (input instanceof VectoredReadable) {
+            ((VectoredReadable) input).preadFully(offset, buffer, 0, length);
+        } else {
+            synchronized (input) {
+                input.seek(offset);
+                IOUtils.readFully(input, buffer);
+            }
+        }
         return buffer;
     }
 
@@ -78,9 +86,33 @@ public class BlockCache implements Closeable {
 
     @Override
     public void close() throws IOException {
+        // Every page has to be handed back to the shared cache manager. Stopping at the first
+        // failure would leave the rest of this file's pages resident in a cache that is shared
+        // across readers, with nothing left holding a reference to invalidate them later.
         Set<CacheKey> sets = new HashSet<>(blocks.keySet());
+        Throwable collected = null;
         for (CacheKey key : sets) {
-            cacheManager.invalidPage(key);
+            try {
+                cacheManager.invalidPage(key);
+            } catch (Throwable t) {
+                collected = ExceptionUtils.firstOrSuppressed(t, collected);
+            }
         }
+        if (collected != null) {
+            rethrowAsIOException(collected);
+        }
+    }
+
+    private static void rethrowAsIOException(Throwable failure) throws IOException {
+        if (failure instanceof IOException) {
+            throw (IOException) failure;
+        }
+        if (failure instanceof Error) {
+            throw (Error) failure;
+        }
+        if (failure instanceof RuntimeException) {
+            throw (RuntimeException) failure;
+        }
+        throw new IOException(failure);
     }
 }

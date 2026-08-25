@@ -18,11 +18,12 @@
 
 package org.apache.paimon.spark
 
+import org.apache.paimon.CoreOptions
 import org.apache.paimon.partition.PartitionPredicate
 import org.apache.paimon.predicate._
 import org.apache.paimon.predicate.SortValue.{NullOrdering, SortDirection}
 import org.apache.paimon.spark.aggregate.AggregatePushDownUtils.tryPushdownAggregation
-import org.apache.paimon.spark.read.PaimonLocalScan
+import org.apache.paimon.spark.read.{PaimonLocalScan, PaimonSupportsPushDownVariantExtractions, VectorSearchResultUtils}
 import org.apache.paimon.table.{FileStoreTable, InnerTable}
 
 import org.apache.spark.sql.connector.expressions
@@ -35,7 +36,8 @@ import scala.collection.JavaConverters._
 class PaimonScanBuilder(val table: InnerTable)
   extends PaimonBaseScanBuilder
   with SupportsPushDownAggregates
-  with SupportsPushDownTopN {
+  with SupportsPushDownTopN
+  with PaimonSupportsPushDownVariantExtractions {
 
   private var localScan: Option[Scan] = None
 
@@ -95,6 +97,10 @@ class PaimonScanBuilder(val table: InnerTable)
 
   // Spark does not support push down aggregation for streaming scan.
   override def pushAggregation(aggregation: Aggregation): Boolean = {
+    if (PostponeMergeOnRead.usesCustomSource(table)) {
+      return false
+    }
+
     if (localScan.isDefined) {
       return true
     }
@@ -128,16 +134,34 @@ class PaimonScanBuilder(val table: InnerTable)
     localScan match {
       case Some(scan) => scan
       case None =>
-        val (actualTable, vectorSearch) = table match {
+        val (actualTable, vectorSearch, hybridSearch, fullTextSearch) = table match {
           case vst: org.apache.paimon.table.VectorSearchTable =>
-            val tableVectorSearch = Option(vst.vectorSearch())
-            val vs = (tableVectorSearch, pushedVectorSearch) match {
-              case (Some(_), _) => tableVectorSearch
-              case (None, Some(_)) => pushedVectorSearch
-              case (None, None) => None
-            }
-            (vst.origin(), vs)
-          case _ => (table, pushedVectorSearch)
+            (vst.origin(), Option(vst.vectorSearch()), None, None)
+          case hst: org.apache.paimon.table.HybridSearchTable =>
+            (hst.origin(), None, Option(hst.hybridSearch()), None)
+          case ftst: org.apache.paimon.table.FullTextSearchTable =>
+            (ftst.origin(), None, None, Option(ftst.fullTextSearch()))
+          case _ => (table, pushedVectorSearch, None, pushedFullTextSearch)
+        }
+
+        if (
+          vectorSearch.isDefined &&
+          !CoreOptions
+            .fromMap(actualTable.options)
+            .primaryKeyVectorIndexColumns()
+            .contains(vectorSearch.get.fieldName()) &&
+          VectorSearchResultUtils.isVectorSearchMetaOnly(requiredSchema.fieldNames.toSeq)
+        ) {
+          val result = PaimonBaseScan.evalVectorSearch(
+            actualTable,
+            vectorSearch.get,
+            pushedPartitionFilters,
+            pushedDataFilters)
+          return PaimonLocalScan(
+            VectorSearchResultUtils.toRows(result, requiredSchema),
+            requiredSchema,
+            actualTable,
+            pushedPartitionFilters)
         }
 
         PaimonScan(
@@ -147,7 +171,11 @@ class PaimonScanBuilder(val table: InnerTable)
           pushedDataFilters,
           pushedLimit,
           pushedTopN,
-          vectorSearch)
+          vectorSearch,
+          hybridSearch,
+          fullTextSearch,
+          acceptedVariantExtractions
+        )
     }
   }
 }

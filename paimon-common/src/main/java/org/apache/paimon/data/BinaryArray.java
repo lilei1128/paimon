@@ -75,6 +75,8 @@ public final class BinaryArray extends BinarySection implements InternalArray, D
             case VARCHAR:
             case BINARY:
             case VARBINARY:
+            case GEOMETRY:
+            case GEOGRAPHY:
             case DECIMAL:
             case BIGINT:
             case DOUBLE:
@@ -247,7 +249,7 @@ public final class BinaryArray extends BinarySection implements InternalArray, D
 
     @Override
     public Blob getBlob(int pos) {
-        return new BlobData(getBinary(pos));
+        return Blob.fromBytes(getBinary(pos), null, null);
     }
 
     @Override

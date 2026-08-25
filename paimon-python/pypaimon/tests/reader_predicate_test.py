@@ -1,20 +1,19 @@
-################################################################################
-#  Licensed to the Apache Software Foundation (ASF) under one
-#  or more contributor license agreements.  See the NOTICE file
-#  distributed with this work for additional information
-#  regarding copyright ownership.  The ASF licenses this file
-#  to you under the Apache License, Version 2.0 (the
-#  "License"); you may not use this file except in compliance
-#  with the License.  You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-#      http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-# limitations under the License.
-################################################################################
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 import os
 import shutil
@@ -105,12 +104,25 @@ class ReaderPredicateTest(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result.field, 'f0')
         self.assertEqual(result.method, 'greaterThan')
-        or_mixed = pb.or_predicates([pb.equal('_ROW_ID', 1), pb.greater_than('f0', 5)])
+        or_mixed = pb.or_predicates([
+            pb.equal('_ROW_ID', 1),
+            pb.greater_than('f0', 5),
+        ])
         result = push_down_utils.remove_row_id_filter(or_mixed)
-        self.assertIsNotNone(result, "OR: strip _ROW_ID child, keep f0>5 (same as Java)")
-        self.assertEqual(result.field, 'f0')
-        self.assertEqual(result.method, 'greaterThan')
-        or_no_row_id = pb.or_predicates([pb.greater_than('f0', 5), pb.less_than('f0', 10)])
+        self.assertIsNotNone(result)
+        self.assertEqual(result.method, 'or')
+        self.assertEqual(len(result.literals), 2)
+        self.assertEqual(result.literals[0].field, '_ROW_ID')
+        self.assertEqual(result.literals[1].field, 'f0')
+        or_row_id = pb.or_predicates([
+            pb.equal('_ROW_ID', 1),
+            pb.equal('_ROW_ID', 2),
+        ])
+        self.assertIsNone(push_down_utils.remove_row_id_filter(or_row_id))
+        or_no_row_id = pb.or_predicates([
+            pb.greater_than('f0', 5),
+            pb.less_than('f0', 10),
+        ])
         result = push_down_utils.remove_row_id_filter(or_no_row_id)
         self.assertIsNotNone(result)
         self.assertEqual(result.method, 'or')

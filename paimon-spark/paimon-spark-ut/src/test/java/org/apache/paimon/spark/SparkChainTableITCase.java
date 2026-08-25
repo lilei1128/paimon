@@ -40,12 +40,13 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 public class SparkChainTableITCase {
 
     private static TestHiveMetastore testHiveMetastore;
-    private static final int PORT = 9091;
+    private static int port;
 
     @BeforeAll
     public static void startMetastore() {
         testHiveMetastore = new TestHiveMetastore();
-        testHiveMetastore.start(PORT);
+        testHiveMetastore.start(0);
+        port = testHiveMetastore.getPort();
     }
 
     @AfterAll
@@ -58,12 +59,12 @@ public class SparkChainTableITCase {
                 .config("spark.sql.warehouse.dir", warehousePath.toString())
                 // with hive metastore
                 .config("spark.sql.catalogImplementation", "hive")
-                .config("hive.metastore.uris", "thrift://localhost:" + PORT)
+                .config("hive.metastore.uris", "thrift://localhost:" + port)
                 .config("spark.sql.catalog.spark_catalog", SparkCatalog.class.getName())
                 .config("spark.sql.catalog.spark_catalog.metastore", "hive")
                 .config(
                         "spark.sql.catalog.spark_catalog.hive.metastore.uris",
-                        "thrift://localhost:" + PORT)
+                        "thrift://localhost:" + port)
                 .config("spark.sql.catalog.spark_catalog.format-table.enabled", "true")
                 .config("spark.sql.catalog.spark_catalog.warehouse", warehousePath.toString())
                 .config(
@@ -113,9 +114,9 @@ public class SparkChainTableITCase {
                         + "    `t1` BIGINT COMMENT 't1',\n"
                         + "    `t2` BIGINT COMMENT 't2',\n"
                         + "    `t3` STRING COMMENT 't3'\n"
-                        + "  ) PARTITIONED BY (`dt` STRING COMMENT 'dt') ROW FORMAT SERDE 'org.apache.paimon.hive.PaimonSerDe'\n"
-                        + "WITH\n"
-                        + "  SERDEPROPERTIES ('serialization.format' = '1') STORED AS INPUTFORMAT 'org.apache.paimon.hive.mapred.PaimonInputFormat' OUTPUTFORMAT 'org.apache.paimon.hive.mapred.PaimonOutputFormat' TBLPROPERTIES (\n"
+                        + "  ) USING paimon\n"
+                        + "PARTITIONED BY (`dt` STRING COMMENT 'dt')\n"
+                        + "TBLPROPERTIES (\n"
                         + "    'bucket-key' = 't1',\n"
                         + "    'primary-key' = 'dt,t1',\n"
                         + "    'partition.timestamp-pattern' = '$dt',\n"
@@ -348,9 +349,9 @@ public class SparkChainTableITCase {
                         + "    `t1` BIGINT COMMENT 't1',\n"
                         + "    `t2` BIGINT COMMENT 't2',\n"
                         + "    `t3` STRING COMMENT 't3'\n"
-                        + "  ) PARTITIONED BY (`dt` STRING COMMENT 'dt', `hour` STRING COMMENT 'hour') ROW FORMAT SERDE 'org.apache.paimon.hive.PaimonSerDe'\n"
-                        + "WITH\n"
-                        + "  SERDEPROPERTIES ('serialization.format' = '1') STORED AS INPUTFORMAT 'org.apache.paimon.hive.mapred.PaimonInputFormat' OUTPUTFORMAT 'org.apache.paimon.hive.mapred.PaimonOutputFormat' TBLPROPERTIES (\n"
+                        + "  ) USING paimon\n"
+                        + "PARTITIONED BY (`dt` STRING COMMENT 'dt', `hour` STRING COMMENT 'hour')\n"
+                        + "TBLPROPERTIES (\n"
                         + "    'bucket-key' = 't1',\n"
                         + "    'primary-key' = 'dt,hour,t1',\n"
                         + "    'partition.timestamp-pattern' = '$dt $hour:00:00',\n"
@@ -591,9 +592,9 @@ public class SparkChainTableITCase {
                         + "    `seq` BIGINT COMMENT 'seq',\n"
                         + "    `v1` STRING COMMENT 'v1',\n"
                         + "    `v2` STRING COMMENT 'v2'\n"
-                        + "  ) PARTITIONED BY (`dt` STRING COMMENT 'dt') ROW FORMAT SERDE 'org.apache.paimon.hive.PaimonSerDe'\n"
-                        + "WITH\n"
-                        + "  SERDEPROPERTIES ('serialization.format' = '1') STORED AS INPUTFORMAT 'org.apache.paimon.hive.mapred.PaimonInputFormat' OUTPUTFORMAT 'org.apache.paimon.hive.mapred.PaimonOutputFormat' TBLPROPERTIES (\n"
+                        + "  ) USING paimon\n"
+                        + "PARTITIONED BY (`dt` STRING COMMENT 'dt')\n"
+                        + "TBLPROPERTIES (\n"
                         + "    'bucket-key' = 'key',\n"
                         + "    'primary-key' = 'dt,key',\n"
                         + "    'partition.timestamp-pattern' = '$dt',\n"
@@ -747,9 +748,9 @@ public class SparkChainTableITCase {
                         + "    `t1` BIGINT COMMENT 't1',\n"
                         + "    `t2` BIGINT COMMENT 't2',\n"
                         + "    `t3` STRING COMMENT 't3'\n"
-                        + "  ) PARTITIONED BY (`dt` STRING COMMENT 'dt') ROW FORMAT SERDE 'org.apache.paimon.hive.PaimonSerDe'\n"
-                        + "WITH\n"
-                        + "  SERDEPROPERTIES ('serialization.format' = '1') STORED AS INPUTFORMAT 'org.apache.paimon.hive.mapred.PaimonInputFormat' OUTPUTFORMAT 'org.apache.paimon.hive.mapred.PaimonOutputFormat' TBLPROPERTIES (\n"
+                        + "  ) USING paimon\n"
+                        + "PARTITIONED BY (`dt` STRING COMMENT 'dt')\n"
+                        + "TBLPROPERTIES (\n"
                         + "    'bucket-key' = 't1',\n"
                         + "    'primary-key' = 'dt,t1',\n"
                         + "    'partition.timestamp-pattern' = '$dt',\n"
@@ -821,7 +822,7 @@ public class SparkChainTableITCase {
                         + "    `t1` string ,"
                         + "    `t2` string ,"
                         + "    `t3` string"
-                        + ") PARTITIONED BY (`date` string)"
+                        + ") USING paimon PARTITIONED BY (`date` string) "
                         + "TBLPROPERTIES ("
                         + "   'chain-table.enabled' = 'true'"
                         + "  ,'primary-key' = 'date,t1'"
@@ -840,6 +841,1741 @@ public class SparkChainTableITCase {
                                 .collect(Collectors.toList()))
                 .containsExactlyInAnyOrder("[1,1,1,20260224]");
         spark.sql("DROP TABLE IF EXISTS `my_db1`.`chain_test_t`;");
+        spark.close();
+    }
+
+    @Test
+    public void testChainTableWithGroupPartition(@TempDir java.nio.file.Path tempDir)
+            throws IOException {
+        Path warehousePath = new Path("file:" + tempDir.toString());
+        SparkSession.Builder builder =
+                SparkSession.builder()
+                        .config("spark.sql.warehouse.dir", warehousePath.toString())
+                        // with hive metastore
+                        .config("spark.sql.catalogImplementation", "hive")
+                        .config("hive.metastore.uris", "thrift://localhost:" + port)
+                        .config("spark.sql.catalog.spark_catalog", SparkCatalog.class.getName())
+                        .config("spark.sql.catalog.spark_catalog.metastore", "hive")
+                        .config(
+                                "spark.sql.catalog.spark_catalog.hive.metastore.uris",
+                                "thrift://localhost:" + port)
+                        .config("spark.sql.catalog.spark_catalog.format-table.enabled", "true")
+                        .config(
+                                "spark.sql.catalog.spark_catalog.warehouse",
+                                warehousePath.toString())
+                        .config(
+                                "spark.sql.extensions",
+                                "org.apache.paimon.spark.extensions.PaimonSparkSessionExtensions")
+                        .master("local[2]");
+        SparkSession spark = builder.getOrCreate();
+        spark.sql("CREATE DATABASE IF NOT EXISTS my_db1");
+        spark.sql("USE spark_catalog.my_db1");
+
+        /** Create table */
+        spark.sql(
+                "CREATE TABLE IF NOT EXISTS \n"
+                        + "  `my_db1`.`chain_test` (\n"
+                        + "    `t1` BIGINT COMMENT 't1',\n"
+                        + "    `t2` BIGINT COMMENT 't2',\n"
+                        + "    `t3` STRING COMMENT 't3'\n"
+                        + "  ) USING paimon\n"
+                        + "PARTITIONED BY (`region` STRING, `dt` STRING COMMENT 'dt')\n"
+                        + "TBLPROPERTIES (\n"
+                        + "    'bucket-key' = 't1',\n"
+                        + "    'primary-key' = 'region,dt,t1',\n"
+                        + "    'partition.timestamp-pattern' = '$dt',\n"
+                        + "    'partition.timestamp-formatter' = 'yyyyMMdd',\n"
+                        + "    'chain-table.enabled' = 'true',\n"
+                        + "    'bucket' = '2',\n"
+                        + "    'merge-engine' = 'deduplicate', \n"
+                        + "    'sequence.field' = 't2',\n"
+                        + "    'chain-table.chain-partition-keys' = 'dt'\n"
+                        + "  )");
+
+        /** Create branch */
+        spark.sql("CALL sys.create_branch('my_db1.chain_test', 'snapshot');");
+        spark.sql("CALL sys.create_branch('my_db1.chain_test', 'delta')");
+
+        /** Set branch */
+        spark.sql(
+                "ALTER TABLE my_db1.chain_test SET tblproperties ("
+                        + "'scan.fallback-snapshot-branch' = 'snapshot', "
+                        + "'scan.fallback-delta-branch' = 'delta')");
+        spark.sql(
+                "ALTER TABLE `my_db1`.`chain_test$branch_snapshot` SET tblproperties ("
+                        + "'scan.fallback-snapshot-branch' = 'snapshot',"
+                        + "'scan.fallback-delta-branch' = 'delta')");
+        spark.sql(
+                "ALTER TABLE `my_db1`.`chain_test$branch_delta` SET tblproperties ("
+                        + "'scan.fallback-snapshot-branch' = 'snapshot',"
+                        + "'scan.fallback-delta-branch' = 'delta')");
+        spark.close();
+        spark = builder.getOrCreate();
+
+        /** Write main branch */
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', dt = '20250810') values (1, 1, '1'),(2, 1, '1');");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'US', dt = '20250810') values (11, 1, '1'),(12, 1, '1');");
+
+        /** Write delta branch */
+        spark.sql("set spark.paimon.branch=delta;");
+
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', dt = '20250809') values (1, 1, '1'),(2, 1, '1');");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', dt = '20250810') values (1, 2, '1-1' ),(3, 1, '1' );");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', dt = '20250811') values (2, 2, '1-1' ),(4, 1, '1' );");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', dt = '20250812') values (3, 2, '1-1' ),(4, 2, '1-1' );");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', dt = '20250813') values (5, 1, '1' ),(6, 1, '1' );");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', dt = '20250814') values (5, 2, '1-1' ),(6, 2, '1-1' );");
+
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'US', dt = '20250809') values (11, 1, '1'),(12, 1, '1');");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'US', dt = '20250810') values (11, 2, '1-1' ),(13, 1, '1' );");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'US', dt = '20250811') values (12, 2, '1-1' ),(14, 1, '1' );");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'US', dt = '20250812') values (13, 2, '1-1' ),(14, 2, '1-1' );");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'US', dt = '20250813') values (15, 1, '1' ),(16, 1, '1' );");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'US', dt = '20250814') values (15, 2, '1-1' ),(16, 2, '1-1' );");
+
+        /** Write snapshot branch */
+        spark.sql("set spark.paimon.branch=snapshot;");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test`  partition (region = 'CN', dt = '20250810')  values (1, 2, '1-1'),(2, 1, '1'),(3, 1, '1');");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', dt = '20250812') values (1, 2, '1-1'),(2, 2, '1-1'),(3, 2, '1-1'), (4, 2, '1-1');");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', dt = '20250814') values (1, 2, '1-1'),(2, 2, '1-1'),(3, 2, '1-1'), (4, 2, '1-1'), (5, 1, '1' ), (6, 1, '1');");
+
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test`  partition (region = 'US', dt = '20250810')  values (11, 2, '1-1'),(12, 1, '1'),(13, 1, '1');");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'US', dt = '20250812') values (11, 2, '1-1'),(12, 2, '1-1'),(13, 2, '1-1'), (14, 2, '1-1');");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'US', dt = '20250814') values (11, 2, '1-1'),(12, 2, '1-1'),(13, 2, '1-1'), (14, 2, '1-1'), (15, 1, '1' ), (16, 1, '1');");
+
+        spark.close();
+        spark = builder.getOrCreate();
+        /** Main read */
+        assertThat(
+                        spark.sql("SELECT * FROM `my_db1`.`chain_test` where dt = '20250810'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,1,1,CN,20250810]",
+                        "[2,1,1,CN,20250810]",
+                        "[11,1,1,US,20250810]",
+                        "[12,1,1,US,20250810]");
+
+        /** Snapshot read */
+        assertThat(
+                        spark.sql("SELECT * FROM `my_db1`.`chain_test` where dt = '20250814'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,2,1-1,CN,20250814]",
+                        "[2,2,1-1,CN,20250814]",
+                        "[3,2,1-1,CN,20250814]",
+                        "[4,2,1-1,CN,20250814]",
+                        "[5,1,1,CN,20250814]",
+                        "[6,1,1,CN,20250814]",
+                        "[11,2,1-1,US,20250814]",
+                        "[12,2,1-1,US,20250814]",
+                        "[13,2,1-1,US,20250814]",
+                        "[14,2,1-1,US,20250814]",
+                        "[15,1,1,US,20250814]",
+                        "[16,1,1,US,20250814]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where region = 'CN' and dt = '20250814'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,2,1-1,CN,20250814]",
+                        "[2,2,1-1,CN,20250814]",
+                        "[3,2,1-1,CN,20250814]",
+                        "[4,2,1-1,CN,20250814]",
+                        "[5,1,1,CN,20250814]",
+                        "[6,1,1,CN,20250814]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where region = 'US' and dt = '20250814'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[11,2,1-1,US,20250814]",
+                        "[12,2,1-1,US,20250814]",
+                        "[13,2,1-1,US,20250814]",
+                        "[14,2,1-1,US,20250814]",
+                        "[15,1,1,US,20250814]",
+                        "[16,1,1,US,20250814]");
+
+        /** Chain read */
+        /** 1. non pre snapshot */
+        assertThat(
+                        spark.sql("SELECT * FROM `my_db1`.`chain_test` where dt = '20250809'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,1,1,CN,20250809]",
+                        "[2,1,1,CN,20250809]",
+                        "[11,1,1,US,20250809]",
+                        "[12,1,1,US,20250809]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where region = 'CN' and dt = '20250809'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder("[1,1,1,CN,20250809]", "[2,1,1,CN,20250809]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where region = 'US' and dt = '20250809'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder("[11,1,1,US,20250809]", "[12,1,1,US,20250809]");
+        /** 2. has pre snapshot */
+        assertThat(
+                        spark.sql("SELECT * FROM `my_db1`.`chain_test` where dt = '20250811'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,2,1-1,CN,20250811]",
+                        "[2,2,1-1,CN,20250811]",
+                        "[3,1,1,CN,20250811]",
+                        "[4,1,1,CN,20250811]",
+                        "[11,2,1-1,US,20250811]",
+                        "[12,2,1-1,US,20250811]",
+                        "[13,1,1,US,20250811]",
+                        "[14,1,1,US,20250811]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where region = 'CN' and dt = '20250811'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,2,1-1,CN,20250811]",
+                        "[2,2,1-1,CN,20250811]",
+                        "[3,1,1,CN,20250811]",
+                        "[4,1,1,CN,20250811]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where region = 'US' and dt = '20250811'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[11,2,1-1,US,20250811]",
+                        "[12,2,1-1,US,20250811]",
+                        "[13,1,1,US,20250811]",
+                        "[14,1,1,US,20250811]");
+
+        /** Multi partition Read */
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where dt in ('20250810', '20250811', '20250812');")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,1,1,CN,20250810]",
+                        "[2,1,1,CN,20250810]",
+                        "[1,2,1-1,CN,20250811]",
+                        "[2,2,1-1,CN,20250811]",
+                        "[3,1,1,CN,20250811]",
+                        "[4,1,1,CN,20250811]",
+                        "[1,2,1-1,CN,20250812]",
+                        "[2,2,1-1,CN,20250812]",
+                        "[3,2,1-1,CN,20250812]",
+                        "[4,2,1-1,CN,20250812]",
+                        "[11,1,1,US,20250810]",
+                        "[12,1,1,US,20250810]",
+                        "[11,2,1-1,US,20250811]",
+                        "[12,2,1-1,US,20250811]",
+                        "[13,1,1,US,20250811]",
+                        "[14,1,1,US,20250811]",
+                        "[11,2,1-1,US,20250812]",
+                        "[12,2,1-1,US,20250812]",
+                        "[13,2,1-1,US,20250812]",
+                        "[14,2,1-1,US,20250812]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where region = 'CN' and dt in ('20250810', '20250811', '20250812');")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,1,1,CN,20250810]",
+                        "[2,1,1,CN,20250810]",
+                        "[1,2,1-1,CN,20250811]",
+                        "[2,2,1-1,CN,20250811]",
+                        "[3,1,1,CN,20250811]",
+                        "[4,1,1,CN,20250811]",
+                        "[1,2,1-1,CN,20250812]",
+                        "[2,2,1-1,CN,20250812]",
+                        "[3,2,1-1,CN,20250812]",
+                        "[4,2,1-1,CN,20250812]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where region = 'US' and dt in ('20250810', '20250811', '20250812');")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[11,1,1,US,20250810]",
+                        "[12,1,1,US,20250810]",
+                        "[11,2,1-1,US,20250811]",
+                        "[12,2,1-1,US,20250811]",
+                        "[13,1,1,US,20250811]",
+                        "[14,1,1,US,20250811]",
+                        "[11,2,1-1,US,20250812]",
+                        "[12,2,1-1,US,20250812]",
+                        "[13,2,1-1,US,20250812]",
+                        "[14,2,1-1,US,20250812]");
+
+        /** Incremental read */
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test$branch_delta` where dt = '20250811'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[2,2,1-1,CN,20250811]",
+                        "[4,1,1,CN,20250811]",
+                        "[12,2,1-1,US,20250811]",
+                        "[14,1,1,US,20250811]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test$branch_delta` where region = 'CN' and dt = '20250811'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder("[2,2,1-1,CN,20250811]", "[4,1,1,CN,20250811]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test$branch_delta` where region = 'US' and dt = '20250811'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder("[12,2,1-1,US,20250811]", "[14,1,1,US,20250811]");
+
+        /** Multi partition incremental read */
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test$branch_delta` where dt in ('20250810', '20250811', '20250812');")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,2,1-1,CN,20250810]",
+                        "[3,1,1,CN,20250810]",
+                        "[2,2,1-1,CN,20250811]",
+                        "[4,1,1,CN,20250811]",
+                        "[3,2,1-1,CN,20250812]",
+                        "[4,2,1-1,CN,20250812]",
+                        "[11,2,1-1,US,20250810]",
+                        "[13,1,1,US,20250810]",
+                        "[12,2,1-1,US,20250811]",
+                        "[14,1,1,US,20250811]",
+                        "[13,2,1-1,US,20250812]",
+                        "[14,2,1-1,US,20250812]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test$branch_delta` where region = 'CN' and dt in ('20250810', '20250811', '20250812');")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,2,1-1,CN,20250810]",
+                        "[3,1,1,CN,20250810]",
+                        "[2,2,1-1,CN,20250811]",
+                        "[4,1,1,CN,20250811]",
+                        "[3,2,1-1,CN,20250812]",
+                        "[4,2,1-1,CN,20250812]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test$branch_delta` where region = 'US' and dt in ('20250810', '20250811', '20250812');")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[11,2,1-1,US,20250810]",
+                        "[13,1,1,US,20250810]",
+                        "[12,2,1-1,US,20250811]",
+                        "[14,1,1,US,20250811]",
+                        "[13,2,1-1,US,20250812]",
+                        "[14,2,1-1,US,20250812]");
+
+        spark.close();
+        spark = builder.getOrCreate();
+        spark.sql("set spark.paimon.branch=delta;");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` values (5, 2, '1', 'CN', '20250813'),(6, 2, '1', 'CN', '20250814'), (15, 2, '1', 'US', '20250813'),(16, 2, '1', 'US', '20250814');");
+
+        spark.close();
+        spark = builder.getOrCreate();
+        Dataset<Row> df =
+                spark.sql(
+                        "SELECT t1,t2,t3 FROM `my_db1`.`chain_test$branch_snapshot` where dt = '20250814'");
+        assertThat(df.count()).isEqualTo(0);
+        df =
+                spark.sql(
+                        "SELECT t1,t2,t3 FROM `my_db1`.`chain_test$branch_delta` where dt = '20250814'");
+        assertThat(df.count()).isEqualTo(2);
+
+        spark.close();
+        spark = builder.getOrCreate();
+        /** Drop table */
+        spark.sql("DROP TABLE IF EXISTS `my_db1`.`chain_test`;");
+
+        spark.close();
+    }
+
+    @Test
+    public void testHourlyChainTableWithGroupPartition(@TempDir java.nio.file.Path tempDir)
+            throws IOException {
+        Path warehousePath = new Path("file:" + tempDir.toString());
+        SparkSession.Builder builder =
+                SparkSession.builder()
+                        .config("spark.sql.warehouse.dir", warehousePath.toString())
+                        // with hive metastore
+                        .config("spark.sql.catalogImplementation", "hive")
+                        .config("hive.metastore.uris", "thrift://localhost:" + port)
+                        .config("spark.sql.catalog.spark_catalog", SparkCatalog.class.getName())
+                        .config("spark.sql.catalog.spark_catalog.metastore", "hive")
+                        .config(
+                                "spark.sql.catalog.spark_catalog.hive.metastore.uris",
+                                "thrift://localhost:" + port)
+                        .config("spark.sql.catalog.spark_catalog.format-table.enabled", "true")
+                        .config(
+                                "spark.sql.catalog.spark_catalog.warehouse",
+                                warehousePath.toString())
+                        .config(
+                                "spark.sql.extensions",
+                                "org.apache.paimon.spark.extensions.PaimonSparkSessionExtensions")
+                        .master("local[2]");
+        SparkSession spark = builder.getOrCreate();
+        spark.sql("CREATE DATABASE IF NOT EXISTS my_db1");
+        spark.sql("USE spark_catalog.my_db1");
+
+        /** Create table */
+        spark.sql(
+                "CREATE TABLE IF NOT EXISTS \n"
+                        + "  `my_db1`.`chain_test` (\n"
+                        + "    `t1` BIGINT COMMENT 't1',\n"
+                        + "    `t2` BIGINT COMMENT 't2',\n"
+                        + "    `t3` STRING COMMENT 't3'\n"
+                        + "  ) USING paimon\n"
+                        + "PARTITIONED BY (`region` STRING, `dt` STRING COMMENT 'dt', `hour` STRING COMMENT 'hour')\n"
+                        + "TBLPROPERTIES (\n"
+                        + "    'bucket-key' = 't1',\n"
+                        + "    'primary-key' = 'region,dt,hour,t1',\n"
+                        + "    'partition.timestamp-pattern' = '$dt $hour:00:00',\n"
+                        + "    'partition.timestamp-formatter' = 'yyyyMMdd HH:mm:ss',\n"
+                        + "    'chain-table.enabled' = 'true',\n"
+                        + "    'bucket' = '2',\n"
+                        + "    'merge-engine' = 'deduplicate', \n"
+                        + "    'sequence.field' = 't2',\n"
+                        + "    'chain-table.chain-partition-keys' = 'dt,hour'\n"
+                        + "  )");
+
+        /** Create branch */
+        spark.sql("CALL sys.create_branch('my_db1.chain_test', 'snapshot');");
+        spark.sql("CALL sys.create_branch('my_db1.chain_test', 'delta')");
+
+        /** Set branch */
+        spark.sql(
+                "ALTER TABLE my_db1.chain_test SET tblproperties ("
+                        + "'scan.fallback-snapshot-branch' = 'snapshot', "
+                        + "'scan.fallback-delta-branch' = 'delta')");
+        spark.sql(
+                "ALTER TABLE `my_db1`.`chain_test$branch_snapshot` SET tblproperties ("
+                        + "'scan.fallback-snapshot-branch' = 'snapshot',"
+                        + "'scan.fallback-delta-branch' = 'delta')");
+        spark.sql(
+                "ALTER TABLE `my_db1`.`chain_test$branch_delta` SET tblproperties ("
+                        + "'scan.fallback-snapshot-branch' = 'snapshot',"
+                        + "'scan.fallback-delta-branch' = 'delta')");
+        spark.close();
+        spark = builder.getOrCreate();
+
+        /** Write main branch */
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', dt = '20250810', hour = '22') values (1, 1, '1'),(2, 1, '1');");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'US', dt = '20250810', hour = '22') values (11, 1, '1'),(12, 1, '1');");
+
+        /** Write delta branch */
+        spark.sql("set spark.paimon.branch=delta;");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', dt = '20250810', hour = '21') values (1, 1, '1'),(2, 1, '1');");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', dt = '20250810', hour = '22') values (1, 2, '1-1' ),(3, 1, '1' );");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', dt = '20250810', hour = '23') values (2, 2, '1-1' ),(4, 1, '1' );");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', dt = '20250811', hour = '00') values (3, 2, '1-1' ),(4, 2, '1-1' );");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', dt = '20250811', hour = '01') values (5, 1, '1' ),(6, 1, '1' );");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', dt = '20250811', hour = '02') values (5, 2, '1-1' ),(6, 2, '1-1' );");
+
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'US', dt = '20250810', hour = '21') values (11, 1, '1'),(12, 1, '1');");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'US', dt = '20250810', hour = '22') values (11, 2, '1-1' ),(13, 1, '1' );");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'US', dt = '20250810', hour = '23') values (12, 2, '1-1' ),(14, 1, '1' );");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'US', dt = '20250811', hour = '00') values (13, 2, '1-1' ),(14, 2, '1-1' );");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'US', dt = '20250811', hour = '01') values (15, 1, '1' ),(16, 1, '1' );");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'US', dt = '20250811', hour = '02') values (15, 2, '1-1' ),(16, 2, '1-1' );");
+
+        /** Write snapshot branch */
+        spark.sql("set spark.paimon.branch=snapshot;");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', dt = '20250810', hour = '22')  values (1, 2, '1-1'),(2, 1, '1'),(3, 1, '1');");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', dt = '20250811', hour = '00') values (1, 2, '1-1'),(2, 2, '1-1'),(3, 2, '1-1'), (4, 2, '1-1');");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', dt = '20250811', hour = '02') values (1, 2, '1-1'),(2, 2, '1-1'),(3, 2, '1-1'), (4, 2, '1-1'), (5, 1, '1' ), (6, 1, '1');");
+
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'US', dt = '20250810', hour = '22')  values (11, 2, '1-1'),(12, 1, '1'),(13, 1, '1');");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'US', dt = '20250811', hour = '00') values (11, 2, '1-1'),(12, 2, '1-1'),(13, 2, '1-1'), (14, 2, '1-1');");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'US', dt = '20250811', hour = '02') values (11, 2, '1-1'),(12, 2, '1-1'),(13, 2, '1-1'), (14, 2, '1-1'), (15, 1, '1' ), (16, 1, '1');");
+
+        spark.close();
+        spark = builder.getOrCreate();
+        /** Main read */
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where dt = '20250810' and hour = '22'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,1,1,CN,20250810,22]",
+                        "[2,1,1,CN,20250810,22]",
+                        "[11,1,1,US,20250810,22]",
+                        "[12,1,1,US,20250810,22]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where region = 'CN' and dt = '20250810' and hour = '22'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder("[1,1,1,CN,20250810,22]", "[2,1,1,CN,20250810,22]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where region = 'US' and dt = '20250810' and hour = '22'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder("[11,1,1,US,20250810,22]", "[12,1,1,US,20250810,22]");
+
+        /** Snapshot read */
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where dt = '20250811' and hour = '02'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,2,1-1,CN,20250811,02]",
+                        "[2,2,1-1,CN,20250811,02]",
+                        "[3,2,1-1,CN,20250811,02]",
+                        "[4,2,1-1,CN,20250811,02]",
+                        "[5,1,1,CN,20250811,02]",
+                        "[6,1,1,CN,20250811,02]",
+                        "[11,2,1-1,US,20250811,02]",
+                        "[12,2,1-1,US,20250811,02]",
+                        "[13,2,1-1,US,20250811,02]",
+                        "[14,2,1-1,US,20250811,02]",
+                        "[15,1,1,US,20250811,02]",
+                        "[16,1,1,US,20250811,02]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where region = 'CN' and dt = '20250811' and hour = '02'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,2,1-1,CN,20250811,02]",
+                        "[2,2,1-1,CN,20250811,02]",
+                        "[3,2,1-1,CN,20250811,02]",
+                        "[4,2,1-1,CN,20250811,02]",
+                        "[5,1,1,CN,20250811,02]",
+                        "[6,1,1,CN,20250811,02]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where region = 'US' and dt = '20250811' and hour = '02'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[11,2,1-1,US,20250811,02]",
+                        "[12,2,1-1,US,20250811,02]",
+                        "[13,2,1-1,US,20250811,02]",
+                        "[14,2,1-1,US,20250811,02]",
+                        "[15,1,1,US,20250811,02]",
+                        "[16,1,1,US,20250811,02]");
+
+        /** Chain read */
+        /** 1. non pre snapshot */
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where dt = '20250810' and hour = '21'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,1,1,CN,20250810,21]",
+                        "[2,1,1,CN,20250810,21]",
+                        "[11,1,1,US,20250810,21]",
+                        "[12,1,1,US,20250810,21]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where region = 'CN' and dt = '20250810' and hour = '21'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder("[1,1,1,CN,20250810,21]", "[2,1,1,CN,20250810,21]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where region = 'US' and dt = '20250810' and hour = '21'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder("[11,1,1,US,20250810,21]", "[12,1,1,US,20250810,21]");
+        /** 2. has pre snapshot */
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where dt = '20250810' and  hour = '23'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,2,1-1,CN,20250810,23]",
+                        "[2,2,1-1,CN,20250810,23]",
+                        "[3,1,1,CN,20250810,23]",
+                        "[4,1,1,CN,20250810,23]",
+                        "[11,2,1-1,US,20250810,23]",
+                        "[12,2,1-1,US,20250810,23]",
+                        "[13,1,1,US,20250810,23]",
+                        "[14,1,1,US,20250810,23]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where region = 'CN' and dt = '20250810' and  hour = '23'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,2,1-1,CN,20250810,23]",
+                        "[2,2,1-1,CN,20250810,23]",
+                        "[3,1,1,CN,20250810,23]",
+                        "[4,1,1,CN,20250810,23]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where region = 'US' and dt = '20250810' and  hour = '23'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[11,2,1-1,US,20250810,23]",
+                        "[12,2,1-1,US,20250810,23]",
+                        "[13,1,1,US,20250810,23]",
+                        "[14,1,1,US,20250810,23]");
+
+        /** Multi partition Read */
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where dt = '20250810' and hour in ('22', '23');")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,1,1,CN,20250810,22]",
+                        "[2,1,1,CN,20250810,22]",
+                        "[1,2,1-1,CN,20250810,23]",
+                        "[2,2,1-1,CN,20250810,23]",
+                        "[3,1,1,CN,20250810,23]",
+                        "[4,1,1,CN,20250810,23]",
+                        "[11,1,1,US,20250810,22]",
+                        "[12,1,1,US,20250810,22]",
+                        "[11,2,1-1,US,20250810,23]",
+                        "[12,2,1-1,US,20250810,23]",
+                        "[13,1,1,US,20250810,23]",
+                        "[14,1,1,US,20250810,23]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where region = 'CN' and dt = '20250810' and hour in ('22', '23');")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,1,1,CN,20250810,22]",
+                        "[2,1,1,CN,20250810,22]",
+                        "[1,2,1-1,CN,20250810,23]",
+                        "[2,2,1-1,CN,20250810,23]",
+                        "[3,1,1,CN,20250810,23]",
+                        "[4,1,1,CN,20250810,23]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where region = 'US' and dt = '20250810' and hour in ('22', '23');")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[11,1,1,US,20250810,22]",
+                        "[12,1,1,US,20250810,22]",
+                        "[11,2,1-1,US,20250810,23]",
+                        "[12,2,1-1,US,20250810,23]",
+                        "[13,1,1,US,20250810,23]",
+                        "[14,1,1,US,20250810,23]");
+
+        /** Incremental read */
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test$branch_delta` where dt = '20250810' and hour = '23'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[2,2,1-1,CN,20250810,23]",
+                        "[4,1,1,CN,20250810,23]",
+                        "[12,2,1-1,US,20250810,23]",
+                        "[14,1,1,US,20250810,23]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test$branch_delta` where region = 'CN' and dt = '20250810' and hour = '23'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder("[2,2,1-1,CN,20250810,23]", "[4,1,1,CN,20250810,23]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test$branch_delta` where region = 'US' and dt = '20250810' and hour = '23'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder("[12,2,1-1,US,20250810,23]", "[14,1,1,US,20250810,23]");
+
+        /** Multi partition incremental read */
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test$branch_delta` where dt = '20250810' and hour in ('22', '23');")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,2,1-1,CN,20250810,22]",
+                        "[3,1,1,CN,20250810,22]",
+                        "[2,2,1-1,CN,20250810,23]",
+                        "[4,1,1,CN,20250810,23]",
+                        "[11,2,1-1,US,20250810,22]",
+                        "[13,1,1,US,20250810,22]",
+                        "[12,2,1-1,US,20250810,23]",
+                        "[14,1,1,US,20250810,23]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test$branch_delta` where region = 'CN' and dt = '20250810' and hour in ('22', '23');")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,2,1-1,CN,20250810,22]",
+                        "[3,1,1,CN,20250810,22]",
+                        "[2,2,1-1,CN,20250810,23]",
+                        "[4,1,1,CN,20250810,23]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test$branch_delta` where region = 'US' and dt = '20250810' and hour in ('22', '23');")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[11,2,1-1,US,20250810,22]",
+                        "[13,1,1,US,20250810,22]",
+                        "[12,2,1-1,US,20250810,23]",
+                        "[14,1,1,US,20250810,23]");
+
+        /** Hybrid read */
+        assertThat(
+                        spark
+                                .sql(
+                                        "select * from  `my_db1`.`chain_test` where dt = '20250810' and hour = '23'\n"
+                                                + "union all\n"
+                                                + "select * from  `my_db1`.`chain_test$branch_delta`  where dt = '20250810' and hour = '23'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,2,1-1,CN,20250810,23]",
+                        "[2,2,1-1,CN,20250810,23]",
+                        "[3,1,1,CN,20250810,23]",
+                        "[4,1,1,CN,20250810,23]",
+                        "[2,2,1-1,CN,20250810,23]",
+                        "[4,1,1,CN,20250810,23]",
+                        "[11,2,1-1,US,20250810,23]",
+                        "[12,2,1-1,US,20250810,23]",
+                        "[13,1,1,US,20250810,23]",
+                        "[14,1,1,US,20250810,23]",
+                        "[12,2,1-1,US,20250810,23]",
+                        "[14,1,1,US,20250810,23]");
+
+        spark.close();
+        spark = builder.getOrCreate();
+        spark.sql("set spark.paimon.branch=delta;");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` values (6, 2, '1', 'CN', '20250811', '02'), (16, 2, '1', 'US', '20250811', '02');");
+
+        spark.close();
+        spark = builder.getOrCreate();
+        Dataset<Row> df =
+                spark.sql(
+                        "SELECT t1,t2,t3 FROM `my_db1`.`chain_test$branch_snapshot` where dt = '20250811' and hour = '02'");
+        assertThat(df.count()).isEqualTo(0);
+        df =
+                spark.sql(
+                        "SELECT t1,t2,t3 FROM `my_db1`.`chain_test$branch_delta` where dt = '20250811' and hour = '02'");
+        assertThat(df.count()).isEqualTo(2);
+
+        spark.close();
+        spark = builder.getOrCreate();
+        /** Drop table */
+        spark.sql("DROP TABLE IF EXISTS `my_db1`.`chain_test`;");
+
+        spark.close();
+    }
+
+    @Test
+    public void testChainTableWithMultiGroupPartition(@TempDir java.nio.file.Path tempDir)
+            throws IOException {
+        Path warehousePath = new Path("file:" + tempDir.toString());
+        SparkSession.Builder builder =
+                SparkSession.builder()
+                        .config("spark.sql.warehouse.dir", warehousePath.toString())
+                        // with hive metastore
+                        .config("spark.sql.catalogImplementation", "hive")
+                        .config("hive.metastore.uris", "thrift://localhost:" + port)
+                        .config("spark.sql.catalog.spark_catalog", SparkCatalog.class.getName())
+                        .config("spark.sql.catalog.spark_catalog.metastore", "hive")
+                        .config(
+                                "spark.sql.catalog.spark_catalog.hive.metastore.uris",
+                                "thrift://localhost:" + port)
+                        .config("spark.sql.catalog.spark_catalog.format-table.enabled", "true")
+                        .config(
+                                "spark.sql.catalog.spark_catalog.warehouse",
+                                warehousePath.toString())
+                        .config(
+                                "spark.sql.extensions",
+                                "org.apache.paimon.spark.extensions.PaimonSparkSessionExtensions")
+                        .master("local[2]");
+        SparkSession spark = builder.getOrCreate();
+        spark.sql("CREATE DATABASE IF NOT EXISTS my_db1");
+        spark.sql("USE spark_catalog.my_db1");
+
+        /** Create table */
+        spark.sql(
+                "CREATE TABLE IF NOT EXISTS \n"
+                        + "  `my_db1`.`chain_test` (\n"
+                        + "    `t1` BIGINT COMMENT 't1',\n"
+                        + "    `t2` BIGINT COMMENT 't2',\n"
+                        + "    `t3` STRING COMMENT 't3'\n"
+                        + "  ) USING paimon\n"
+                        + "PARTITIONED BY (`region` STRING, `biz_type` STRING COMMENT 'biz_type', `dt` STRING COMMENT 'dt')\n"
+                        + "TBLPROPERTIES (\n"
+                        + "    'bucket-key' = 't1',\n"
+                        + "    'primary-key' = 'region,biz_type,dt,t1',\n"
+                        + "    'partition.timestamp-pattern' = '$dt',\n"
+                        + "    'partition.timestamp-formatter' = 'yyyyMMdd',\n"
+                        + "    'chain-table.enabled' = 'true',\n"
+                        + "    'bucket' = '2',\n"
+                        + "    'merge-engine' = 'deduplicate', \n"
+                        + "    'sequence.field' = 't2',\n"
+                        + "    'chain-table.chain-partition-keys' = 'dt'\n"
+                        + "  )");
+
+        /** Create branch */
+        spark.sql("CALL sys.create_branch('my_db1.chain_test', 'snapshot');");
+        spark.sql("CALL sys.create_branch('my_db1.chain_test', 'delta')");
+
+        /** Set branch */
+        spark.sql(
+                "ALTER TABLE my_db1.chain_test SET tblproperties ("
+                        + "'scan.fallback-snapshot-branch' = 'snapshot', "
+                        + "'scan.fallback-delta-branch' = 'delta')");
+        spark.sql(
+                "ALTER TABLE `my_db1`.`chain_test$branch_snapshot` SET tblproperties ("
+                        + "'scan.fallback-snapshot-branch' = 'snapshot',"
+                        + "'scan.fallback-delta-branch' = 'delta')");
+        spark.sql(
+                "ALTER TABLE `my_db1`.`chain_test$branch_delta` SET tblproperties ("
+                        + "'scan.fallback-snapshot-branch' = 'snapshot',"
+                        + "'scan.fallback-delta-branch' = 'delta')");
+        spark.close();
+        spark = builder.getOrCreate();
+
+        /** Write main branch */
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', biz_type = '0', dt = '20250810') values (1, 1, '1'),(2, 1, '1');");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', biz_type = '1', dt = '20250810') values (1, 1, '1'),(2, 1, '1');");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'US', biz_type = '1', dt = '20250810') values (11, 1, '1'),(12, 1, '1');");
+
+        /** Write delta branch */
+        spark.sql("set spark.paimon.branch=delta;");
+
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', biz_type = '0', dt = '20250809') values (1, 1, '1'),(2, 1, '1');");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', biz_type = '0', dt = '20250810') values (1, 2, '1-1' ),(3, 1, '1' );");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', biz_type = '0', dt = '20250811') values (2, 2, '1-1' ),(4, 1, '1' );");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', biz_type = '0', dt = '20250812') values (3, 2, '1-1' ),(4, 2, '1-1' );");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', biz_type = '0', dt = '20250813') values (5, 1, '1' ),(6, 1, '1' );");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', biz_type = '0', dt = '20250814') values (5, 2, '1-1' ),(6, 2, '1-1' );");
+
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', biz_type = '1', dt = '20250809') values (1, 1, '1'),(2, 1, '1');");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', biz_type = '1', dt = '20250810') values (1, 2, '1-1' ),(3, 1, '1' );");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', biz_type = '1', dt = '20250811') values (2, 2, '1-1' ),(4, 1, '1' );");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', biz_type = '1', dt = '20250812') values (3, 2, '1-1' ),(4, 2, '1-1' );");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', biz_type = '1', dt = '20250813') values (5, 1, '1' ),(6, 1, '1' );");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', biz_type = '1', dt = '20250814') values (5, 2, '1-1' ),(6, 2, '1-1' );");
+
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'US', biz_type = '1', dt = '20250809') values (11, 1, '1'),(12, 1, '1');");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'US', biz_type = '1', dt = '20250810') values (11, 2, '1-1' ),(13, 1, '1' );");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'US', biz_type = '1', dt = '20250811') values (12, 2, '1-1' ),(14, 1, '1' );");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'US', biz_type = '1', dt = '20250812') values (13, 2, '1-1' ),(14, 2, '1-1' );");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'US', biz_type = '1', dt = '20250813') values (15, 1, '1' ),(16, 1, '1' );");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'US', biz_type = '1', dt = '20250814') values (15, 2, '1-1' ),(16, 2, '1-1' );");
+
+        /** Write snapshot branch */
+        spark.sql("set spark.paimon.branch=snapshot;");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test`  partition (region = 'CN', biz_type = '0', dt = '20250810')  values (1, 2, '1-1'),(2, 1, '1'),(3, 1, '1');");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', biz_type = '0', dt = '20250812') values (1, 2, '1-1'),(2, 2, '1-1'),(3, 2, '1-1'), (4, 2, '1-1');");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', biz_type = '0', dt = '20250814') values (1, 2, '1-1'),(2, 2, '1-1'),(3, 2, '1-1'), (4, 2, '1-1'), (5, 1, '1' ), (6, 1, '1');");
+
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test`  partition (region = 'CN', biz_type = '1', dt = '20250810')  values (1, 2, '1-1'),(2, 1, '1'),(3, 1, '1');");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', biz_type = '1', dt = '20250812') values (1, 2, '1-1'),(2, 2, '1-1'),(3, 2, '1-1'), (4, 2, '1-1');");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'CN', biz_type = '1', dt = '20250814') values (1, 2, '1-1'),(2, 2, '1-1'),(3, 2, '1-1'), (4, 2, '1-1'), (5, 1, '1' ), (6, 1, '1');");
+
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test`  partition (region = 'US', biz_type = '1', dt = '20250810')  values (11, 2, '1-1'),(12, 1, '1'),(13, 1, '1');");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'US', biz_type = '1', dt = '20250812') values (11, 2, '1-1'),(12, 2, '1-1'),(13, 2, '1-1'), (14, 2, '1-1');");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` partition (region = 'US', biz_type = '1', dt = '20250814') values (11, 2, '1-1'),(12, 2, '1-1'),(13, 2, '1-1'), (14, 2, '1-1'), (15, 1, '1' ), (16, 1, '1');");
+
+        spark.close();
+        spark = builder.getOrCreate();
+        /** Main read */
+        assertThat(
+                        spark.sql("SELECT * FROM `my_db1`.`chain_test` where dt = '20250810'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,1,1,CN,0,20250810]",
+                        "[2,1,1,CN,0,20250810]",
+                        "[1,1,1,CN,1,20250810]",
+                        "[2,1,1,CN,1,20250810]",
+                        "[11,1,1,US,1,20250810]",
+                        "[12,1,1,US,1,20250810]");
+
+        /** Snapshot read */
+        assertThat(
+                        spark.sql("SELECT * FROM `my_db1`.`chain_test` where dt = '20250814'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,2,1-1,CN,0,20250814]",
+                        "[2,2,1-1,CN,0,20250814]",
+                        "[3,2,1-1,CN,0,20250814]",
+                        "[4,2,1-1,CN,0,20250814]",
+                        "[5,1,1,CN,0,20250814]",
+                        "[6,1,1,CN,0,20250814]",
+                        "[1,2,1-1,CN,1,20250814]",
+                        "[2,2,1-1,CN,1,20250814]",
+                        "[3,2,1-1,CN,1,20250814]",
+                        "[4,2,1-1,CN,1,20250814]",
+                        "[5,1,1,CN,1,20250814]",
+                        "[6,1,1,CN,1,20250814]",
+                        "[11,2,1-1,US,1,20250814]",
+                        "[12,2,1-1,US,1,20250814]",
+                        "[13,2,1-1,US,1,20250814]",
+                        "[14,2,1-1,US,1,20250814]",
+                        "[15,1,1,US,1,20250814]",
+                        "[16,1,1,US,1,20250814]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where region = 'CN' and biz_type  = '0' and dt = '20250814'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,2,1-1,CN,0,20250814]",
+                        "[2,2,1-1,CN,0,20250814]",
+                        "[3,2,1-1,CN,0,20250814]",
+                        "[4,2,1-1,CN,0,20250814]",
+                        "[5,1,1,CN,0,20250814]",
+                        "[6,1,1,CN,0,20250814]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where region = 'CN' and biz_type  = '1' and dt = '20250814'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,2,1-1,CN,1,20250814]",
+                        "[2,2,1-1,CN,1,20250814]",
+                        "[3,2,1-1,CN,1,20250814]",
+                        "[4,2,1-1,CN,1,20250814]",
+                        "[5,1,1,CN,1,20250814]",
+                        "[6,1,1,CN,1,20250814]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where region = 'US' and dt = '20250814'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[11,2,1-1,US,1,20250814]",
+                        "[12,2,1-1,US,1,20250814]",
+                        "[13,2,1-1,US,1,20250814]",
+                        "[14,2,1-1,US,1,20250814]",
+                        "[15,1,1,US,1,20250814]",
+                        "[16,1,1,US,1,20250814]");
+
+        /** Chain read */
+        /** 1. non pre snapshot */
+        assertThat(
+                        spark.sql("SELECT * FROM `my_db1`.`chain_test` where dt = '20250809'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,1,1,CN,0,20250809]",
+                        "[2,1,1,CN,0,20250809]",
+                        "[1,1,1,CN,1,20250809]",
+                        "[2,1,1,CN,1,20250809]",
+                        "[11,1,1,US,1,20250809]",
+                        "[12,1,1,US,1,20250809]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where region = 'CN' and biz_type  = '0' and dt = '20250809'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder("[1,1,1,CN,0,20250809]", "[2,1,1,CN,0,20250809]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where region = 'CN' and biz_type  = '1' and dt = '20250809'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder("[1,1,1,CN,1,20250809]", "[2,1,1,CN,1,20250809]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where region = 'US' and dt = '20250809'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder("[11,1,1,US,1,20250809]", "[12,1,1,US,1,20250809]");
+
+        /** 2. has pre snapshot */
+        assertThat(
+                        spark.sql("SELECT * FROM `my_db1`.`chain_test` where dt = '20250811'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,2,1-1,CN,0,20250811]",
+                        "[2,2,1-1,CN,0,20250811]",
+                        "[3,1,1,CN,0,20250811]",
+                        "[4,1,1,CN,0,20250811]",
+                        "[1,2,1-1,CN,1,20250811]",
+                        "[2,2,1-1,CN,1,20250811]",
+                        "[3,1,1,CN,1,20250811]",
+                        "[4,1,1,CN,1,20250811]",
+                        "[11,2,1-1,US,1,20250811]",
+                        "[12,2,1-1,US,1,20250811]",
+                        "[13,1,1,US,1,20250811]",
+                        "[14,1,1,US,1,20250811]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where region = 'CN' and biz_type  = '0' and dt = '20250811'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,2,1-1,CN,0,20250811]",
+                        "[2,2,1-1,CN,0,20250811]",
+                        "[3,1,1,CN,0,20250811]",
+                        "[4,1,1,CN,0,20250811]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where region = 'CN' and biz_type  = '1' and dt = '20250811'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,2,1-1,CN,1,20250811]",
+                        "[2,2,1-1,CN,1,20250811]",
+                        "[3,1,1,CN,1,20250811]",
+                        "[4,1,1,CN,1,20250811]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where region = 'US' and dt = '20250811'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[11,2,1-1,US,1,20250811]",
+                        "[12,2,1-1,US,1,20250811]",
+                        "[13,1,1,US,1,20250811]",
+                        "[14,1,1,US,1,20250811]");
+
+        /** Multi partition Read */
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where dt in ('20250810', '20250811', '20250812');")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,1,1,CN,0,20250810]",
+                        "[2,1,1,CN,0,20250810]",
+                        "[1,2,1-1,CN,0,20250811]",
+                        "[2,2,1-1,CN,0,20250811]",
+                        "[3,1,1,CN,0,20250811]",
+                        "[4,1,1,CN,0,20250811]",
+                        "[1,2,1-1,CN,0,20250812]",
+                        "[2,2,1-1,CN,0,20250812]",
+                        "[3,2,1-1,CN,0,20250812]",
+                        "[4,2,1-1,CN,0,20250812]",
+                        "[1,1,1,CN,1,20250810]",
+                        "[2,1,1,CN,1,20250810]",
+                        "[1,2,1-1,CN,1,20250811]",
+                        "[2,2,1-1,CN,1,20250811]",
+                        "[3,1,1,CN,1,20250811]",
+                        "[4,1,1,CN,1,20250811]",
+                        "[1,2,1-1,CN,1,20250812]",
+                        "[2,2,1-1,CN,1,20250812]",
+                        "[3,2,1-1,CN,1,20250812]",
+                        "[4,2,1-1,CN,1,20250812]",
+                        "[11,1,1,US,1,20250810]",
+                        "[12,1,1,US,1,20250810]",
+                        "[11,2,1-1,US,1,20250811]",
+                        "[12,2,1-1,US,1,20250811]",
+                        "[13,1,1,US,1,20250811]",
+                        "[14,1,1,US,1,20250811]",
+                        "[11,2,1-1,US,1,20250812]",
+                        "[12,2,1-1,US,1,20250812]",
+                        "[13,2,1-1,US,1,20250812]",
+                        "[14,2,1-1,US,1,20250812]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where region = 'CN' and biz_type  = '0' and dt in ('20250810', '20250811', '20250812');")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,1,1,CN,0,20250810]",
+                        "[2,1,1,CN,0,20250810]",
+                        "[1,2,1-1,CN,0,20250811]",
+                        "[2,2,1-1,CN,0,20250811]",
+                        "[3,1,1,CN,0,20250811]",
+                        "[4,1,1,CN,0,20250811]",
+                        "[1,2,1-1,CN,0,20250812]",
+                        "[2,2,1-1,CN,0,20250812]",
+                        "[3,2,1-1,CN,0,20250812]",
+                        "[4,2,1-1,CN,0,20250812]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where region = 'CN' and biz_type  = '1' and dt in ('20250810', '20250811', '20250812');")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,1,1,CN,1,20250810]",
+                        "[2,1,1,CN,1,20250810]",
+                        "[1,2,1-1,CN,1,20250811]",
+                        "[2,2,1-1,CN,1,20250811]",
+                        "[3,1,1,CN,1,20250811]",
+                        "[4,1,1,CN,1,20250811]",
+                        "[1,2,1-1,CN,1,20250812]",
+                        "[2,2,1-1,CN,1,20250812]",
+                        "[3,2,1-1,CN,1,20250812]",
+                        "[4,2,1-1,CN,1,20250812]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` where region = 'US' and dt in ('20250810', '20250811', '20250812');")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[11,1,1,US,1,20250810]",
+                        "[12,1,1,US,1,20250810]",
+                        "[11,2,1-1,US,1,20250811]",
+                        "[12,2,1-1,US,1,20250811]",
+                        "[13,1,1,US,1,20250811]",
+                        "[14,1,1,US,1,20250811]",
+                        "[11,2,1-1,US,1,20250812]",
+                        "[12,2,1-1,US,1,20250812]",
+                        "[13,2,1-1,US,1,20250812]",
+                        "[14,2,1-1,US,1,20250812]");
+
+        /** Incremental read */
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test$branch_delta` where dt = '20250811'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[2,2,1-1,CN,0,20250811]",
+                        "[4,1,1,CN,0,20250811]",
+                        "[2,2,1-1,CN,1,20250811]",
+                        "[4,1,1,CN,1,20250811]",
+                        "[12,2,1-1,US,1,20250811]",
+                        "[14,1,1,US,1,20250811]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test$branch_delta` where region = 'CN' and biz_type  = '0' and dt = '20250811'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder("[2,2,1-1,CN,0,20250811]", "[4,1,1,CN,0,20250811]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test$branch_delta` where region = 'CN' and biz_type  = '1' and dt = '20250811'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder("[2,2,1-1,CN,1,20250811]", "[4,1,1,CN,1,20250811]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test$branch_delta` where region = 'US' and dt = '20250811'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder("[12,2,1-1,US,1,20250811]", "[14,1,1,US,1,20250811]");
+
+        /** Multi partition incremental read */
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test$branch_delta` where dt in ('20250810', '20250811', '20250812');")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,2,1-1,CN,0,20250810]",
+                        "[3,1,1,CN,0,20250810]",
+                        "[2,2,1-1,CN,0,20250811]",
+                        "[4,1,1,CN,0,20250811]",
+                        "[3,2,1-1,CN,0,20250812]",
+                        "[4,2,1-1,CN,0,20250812]",
+                        "[1,2,1-1,CN,1,20250810]",
+                        "[3,1,1,CN,1,20250810]",
+                        "[2,2,1-1,CN,1,20250811]",
+                        "[4,1,1,CN,1,20250811]",
+                        "[3,2,1-1,CN,1,20250812]",
+                        "[4,2,1-1,CN,1,20250812]",
+                        "[11,2,1-1,US,1,20250810]",
+                        "[13,1,1,US,1,20250810]",
+                        "[12,2,1-1,US,1,20250811]",
+                        "[14,1,1,US,1,20250811]",
+                        "[13,2,1-1,US,1,20250812]",
+                        "[14,2,1-1,US,1,20250812]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test$branch_delta` where region = 'CN' and biz_type  = '0' and dt in ('20250810', '20250811', '20250812');")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,2,1-1,CN,0,20250810]",
+                        "[3,1,1,CN,0,20250810]",
+                        "[2,2,1-1,CN,0,20250811]",
+                        "[4,1,1,CN,0,20250811]",
+                        "[3,2,1-1,CN,0,20250812]",
+                        "[4,2,1-1,CN,0,20250812]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test$branch_delta` where region = 'CN' and biz_type  = '1' and dt in ('20250810', '20250811', '20250812');")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,2,1-1,CN,1,20250810]",
+                        "[3,1,1,CN,1,20250810]",
+                        "[2,2,1-1,CN,1,20250811]",
+                        "[4,1,1,CN,1,20250811]",
+                        "[3,2,1-1,CN,1,20250812]",
+                        "[4,2,1-1,CN,1,20250812]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test$branch_delta` where region = 'US' and dt in ('20250810', '20250811', '20250812');")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[11,2,1-1,US,1,20250810]",
+                        "[13,1,1,US,1,20250810]",
+                        "[12,2,1-1,US,1,20250811]",
+                        "[14,1,1,US,1,20250811]",
+                        "[13,2,1-1,US,1,20250812]",
+                        "[14,2,1-1,US,1,20250812]");
+
+        spark.close();
+        spark = builder.getOrCreate();
+        spark.sql("set spark.paimon.branch=delta;");
+        spark.sql(
+                "insert overwrite table  `my_db1`.`chain_test` values (5, 2, '1', 'CN', '0', '20250813'),(6, 2, '1', 'CN', '0', '20250814'), (15, 2, '1', 'US', '1', '20250813'),(16, 2, '1', 'US', '1', '20250814');");
+
+        spark.close();
+        spark = builder.getOrCreate();
+        Dataset<Row> df =
+                spark.sql(
+                        "SELECT t1,t2,t3 FROM `my_db1`.`chain_test$branch_snapshot` where dt = '20250814'");
+        assertThat(df.count()).isEqualTo(0);
+        df =
+                spark.sql(
+                        "SELECT t1,t2,t3 FROM `my_db1`.`chain_test$branch_delta` where dt = '20250814'");
+        assertThat(df.count()).isEqualTo(2);
+
+        spark.close();
+        spark = builder.getOrCreate();
+        /** Drop table */
+        spark.sql("DROP TABLE IF EXISTS `my_db1`.`chain_test`;");
+
+        spark.close();
+    }
+
+    @Test
+    public void testChainTableWithBranchOption(@TempDir java.nio.file.Path tempDir)
+            throws IOException {
+        Path warehousePath = new Path("file:" + tempDir.toString());
+        SparkSession.Builder builder = createSparkSessionBuilder(warehousePath);
+        SparkSession spark = builder.getOrCreate();
+        spark.sql("CREATE DATABASE IF NOT EXISTS my_db1");
+        spark.sql("USE spark_catalog.my_db1");
+        spark.sql("DROP TABLE IF EXISTS `my_db1`.`chain_test`;");
+        spark.sql(
+                "CREATE TABLE IF NOT EXISTS `chain_test` (\n"
+                        + "  `t1` BIGINT,\n"
+                        + "  `t2` BIGINT,\n"
+                        + "  `t3` STRING\n"
+                        + ") USING paimon PARTITIONED BY (`dt` STRING)\n"
+                        + "TBLPROPERTIES (\n"
+                        + "  'bucket-key' = 't1',\n"
+                        + "  'primary-key' = 'dt,t1',\n"
+                        + "  'partition.timestamp-pattern' = '$dt',\n"
+                        + "  'partition.timestamp-formatter' = 'yyyyMMdd',\n"
+                        + "  'chain-table.enabled' = 'true',\n"
+                        + "  'bucket' = '1',\n"
+                        + "  'merge-engine' = 'deduplicate',\n"
+                        + "  'sequence.field' = 't2'\n"
+                        + ")");
+        setupChainTableBranches(spark, "chain_test");
+        // Write main branch
+        spark.sql(
+                "INSERT OVERWRITE TABLE `my_db1`.`chain_test` PARTITION (dt = '20250810') VALUES (1, 3, '0')");
+        // Write delta branch
+        spark.sql("SET spark.paimon.branch = delta");
+        spark.sql(
+                "INSERT OVERWRITE TABLE `my_db1`.`chain_test` PARTITION (dt = '20250810') VALUES (1, 2, '1')");
+        spark.sql(
+                "INSERT OVERWRITE TABLE `my_db1`.`chain_test$branch_delta` PARTITION (dt = '20250811') VALUES (2, 2, '1')");
+        assertThat(spark.sql("SELECT * FROM `my_db1`.`chain_test$snapshots`").count()).isEqualTo(2);
+        spark.sql("RESET spark.paimon.branch");
+        assertThat(
+                        spark.sql("SELECT * FROM `my_db1`.`chain_test` where dt = '20250811'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder("[1,2,1,20250811]", "[2,2,1,20250811]");
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test$branch_snapshot` WHERE dt = '20250811'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .isEmpty();
+
+        spark.sql("SET spark.paimon.branch = snapshot");
+        assertThat(
+                        spark.sql("SELECT * FROM `my_db1`.`chain_test` where dt = '20250811'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .isEmpty();
+        assertThat(spark.sql("SELECT * FROM `my_db1`.`chain_test$snapshots`").count()).isEqualTo(2);
+        spark.sql("DROP TABLE IF EXISTS `my_db1`.`chain_test`;");
+        spark.close();
+    }
+
+    @Test
+    public void testChainTableWithMultiChainKeys(@TempDir java.nio.file.Path tempDir)
+            throws IOException {
+        Path warehousePath = new Path("file:" + tempDir.toString());
+        SparkSession.Builder builder = createSparkSessionBuilder(warehousePath);
+        SparkSession spark = builder.getOrCreate();
+        spark.sql("CREATE DATABASE IF NOT EXISTS my_db1");
+        spark.sql("USE spark_catalog.my_db1");
+
+        spark.sql(
+                "CREATE TABLE `chain_test` (\n"
+                        + "  `t1` BIGINT COMMENT 't1',\n"
+                        + "  `t2` BIGINT COMMENT 't2',\n"
+                        + "  `t3` STRING COMMENT 't3'\n"
+                        + ") USING paimon PARTITIONED BY (`dt` STRING, `hr` STRING)\n"
+                        + "TBLPROPERTIES (\n"
+                        + "  'bucket-key' = 't1',\n"
+                        + "  'primary-key' = 'dt,hr,t1',\n"
+                        + "  'partition.timestamp-pattern' = '$dt $hr:00:00',\n"
+                        + "  'partition.timestamp-formatter' = 'yyyyMMdd HH:mm:ss',\n"
+                        + "  'chain-table.enabled' = 'true',\n"
+                        + "  'bucket' = '1',\n"
+                        + "  'merge-engine' = 'deduplicate',\n"
+                        + "  'sequence.field' = 't2',\n"
+                        + "  'chain-table.chain-partition-keys' = 'dt,hr'\n"
+                        + ")");
+
+        setupChainTableBranches(spark, "chain_test");
+
+        // Write snapshot branch
+        spark.sql(
+                "INSERT INTO TABLE `my_db1`.`chain_test$branch_snapshot` PARTITION (dt = '20250809', hr='01') VALUES (3, 1, '3');");
+        spark.sql(
+                "INSERT INTO TABLE `my_db1`.`chain_test$branch_snapshot` PARTITION (dt = '20250809', hr='02') VALUES (4, 1, '4');");
+
+        // Write delta branch
+        spark.sql(
+                "INSERT INTO TABLE `my_db1`.`chain_test$branch_delta` PARTITION (dt = '20250810', hr='03') VALUES (5, 1, '5');");
+        spark.sql(
+                "INSERT INTO TABLE `my_db1`.`chain_test$branch_delta` PARTITION (dt = '20250810', hr='05') VALUES (6, 1, '6');");
+
+        // Query dt='20250810' and hr='05'
+        // Expected: snapshot(20250809/02) + delta(20250810/05)
+        // Because chain key = (dt, hr), anchor is the nearest earlier (20250809, 02)
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_test` WHERE dt='20250810' AND hr='05'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[4,1,4,20250810,05]", "[5,1,5,20250810,05]", "[6,1,6,20250810,05]");
+
+        spark.sql("DROP TABLE IF EXISTS `my_db1`.`chain_test`;");
+        spark.close();
+    }
+
+    @Test
+    public void testChainTableWithMinuteLevelPartitions(@TempDir java.nio.file.Path tempDir)
+            throws IOException {
+        Path warehousePath = new Path("file:" + tempDir.toString());
+        SparkSession.Builder builder = createSparkSessionBuilder(warehousePath);
+        SparkSession spark = builder.getOrCreate();
+        spark.sql("CREATE DATABASE IF NOT EXISTS my_db1");
+        spark.sql("USE spark_catalog.my_db1");
+
+        spark.sql(
+                "CREATE TABLE `chain_test` (\n"
+                        + "  `t1` BIGINT COMMENT 't1',\n"
+                        + "  `t2` BIGINT COMMENT 't2',\n"
+                        + "  `t3` STRING COMMENT 't3'\n"
+                        + ") PARTITIONED BY (`dt` STRING, `hr_min` STRING)\n"
+                        + "TBLPROPERTIES (\n"
+                        + "  'bucket-key' = 't1',\n"
+                        + "  'primary-key' = 'dt,hr_min,t1',\n"
+                        + "  'partition.timestamp-pattern' = '$dt $hr_min:00',\n"
+                        + "  'partition.timestamp-formatter' = 'yyyyMMdd HH:mm:ss',\n"
+                        + "  'chain-table.enabled' = 'true',\n"
+                        + "  'bucket' = '1',\n"
+                        + "  'merge-engine' = 'deduplicate',\n"
+                        + "  'sequence.field' = 't2',\n"
+                        + "  'chain-table.chain-partition-keys' = 'dt,hr_min'\n"
+                        + ");");
+
+        setupChainTableBranches(spark, "chain_test");
+
+        spark.sql(
+                "INSERT INTO TABLE `chain_test$branch_snapshot` PARTITION (dt = '20250810', hr_min='01:01') VALUES (3, 1, '3');");
+        spark.sql(
+                "INSERT INTO TABLE `chain_test$branch_snapshot` PARTITION (dt = '20250810', hr_min='03:30') VALUES (4, 1, '4');");
+
+        spark.sql(
+                "INSERT INTO TABLE `chain_test$branch_delta` PARTITION (dt = '20250810', hr_min='03:35') VALUES (5, 1, '5');");
+        spark.sql(
+                "INSERT INTO TABLE `chain_test$branch_delta` PARTITION (dt = '20250810', hr_min='03:40') VALUES (6, 1, '6');");
+        spark.sql(
+                "INSERT INTO TABLE `chain_test$branch_delta` PARTITION (dt = '20250810', hr_min='03:45') VALUES (7, 1, '7');");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "select * from `chain_test` where dt='20250810' and hr_min='03:40'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[4,1,4,20250810,03:40]",
+                        "[5,1,5,20250810,03:40]",
+                        "[6,1,6,20250810,03:40]");
+
+        spark.sql("DROP TABLE IF EXISTS `my_db1`.`chain_test`;");
+        spark.close();
+    }
+
+    @Test
+    public void testChainTableWithDeletionVectors(@TempDir java.nio.file.Path tempDir)
+            throws IOException {
+        Path warehousePath = new Path("file:" + tempDir.toString());
+        SparkSession.Builder builder = createSparkSessionBuilder(warehousePath);
+        SparkSession spark = builder.getOrCreate();
+        spark.sql("CREATE DATABASE IF NOT EXISTS my_db1");
+        spark.sql("USE spark_catalog.my_db1");
+
+        spark.sql(
+                "CREATE TABLE IF NOT EXISTS `chain_dv_t1` (\n"
+                        + "  `t1` BIGINT COMMENT 't1',\n"
+                        + "  `t2` BIGINT COMMENT 't2',\n"
+                        + "  `t3` STRING COMMENT 't3'\n"
+                        + ") USING paimon\n"
+                        + "PARTITIONED BY (`region` STRING COMMENT 'region', `date` STRING COMMENT 'date')\n"
+                        + "TBLPROPERTIES (\n"
+                        + "  'chain-table.enabled' = 'true',\n"
+                        + "  'deletion-vectors.enabled' = 'true',\n"
+                        + "  'primary-key' = 'region,date,t1',\n"
+                        + "  'sequence.field' = 't2',\n"
+                        + "  'bucket-key' = 't1',\n"
+                        + "  'bucket' = '1',\n"
+                        + "  'partition.timestamp-pattern' = '$date',\n"
+                        + "  'partition.timestamp-formatter' = 'yyyyMMdd',\n"
+                        + "  'chain-table.chain-partition-keys' = 'date',\n"
+                        + "  'compaction.min.file-num' = '100',\n"
+                        + "  'num-sorted-run.compaction-trigger' = '20'\n"
+                        + ")");
+
+        setupChainTableBranches(spark, "chain_dv_t1");
+
+        spark.sql(
+                "INSERT INTO TABLE `my_db1`.`chain_dv_t1$branch_snapshot` PARTITION (region = 'CN', date = '20260222') VALUES (1, 1, '1'), (6, 1, '1')");
+        spark.sql(
+                "INSERT INTO TABLE `my_db1`.`chain_dv_t1$branch_snapshot` PARTITION (region = 'CN', date = '20260223') VALUES (1, 2, '2'), (2, 2, '2'), (3, 1, '1')");
+        spark.sql(
+                "INSERT INTO TABLE `my_db1`.`chain_dv_t1$branch_snapshot` PARTITION (region = 'US', date = '20260223') VALUES (11, 1, '1')");
+
+        spark.sql(
+                "INSERT INTO TABLE `my_db1`.`chain_dv_t1$branch_delta` PARTITION (region = 'CN', date = '20260224') VALUES (1, 3, '3'), (4, 1, '1'), (5, 1, '1')");
+        spark.sql(
+                "INSERT INTO TABLE `my_db1`.`chain_dv_t1$branch_delta` PARTITION (region = 'US', date = '20260224') VALUES (12, 1, '1')");
+        // Delete rows from both branches to produce deletion vectors
+        spark.sql("DELETE FROM `my_db1`.`chain_dv_t1$branch_snapshot` WHERE t1 = 3");
+        spark.sql("DELETE FROM `my_db1`.`chain_dv_t1$branch_delta` WHERE t1 = 4");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_dv_t1$branch_snapshot` WHERE date = '20260223'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,2,2,CN,20260223]", "[2,2,2,CN,20260223]", "[11,1,1,US,20260223]");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_dv_t1$branch_delta` WHERE date = '20260224'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,3,3,CN,20260224]", "[5,1,1,CN,20260224]", "[12,1,1,US,20260224]");
+
+        assertThat(
+                        spark.sql("SELECT * FROM `my_db1`.`chain_dv_t1` WHERE date = '20260224'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,3,3,CN,20260224]",
+                        "[2,2,2,CN,20260224]",
+                        "[5,1,1,CN,20260224]",
+                        "[11,1,1,US,20260224]",
+                        "[12,1,1,US,20260224]");
+
+        spark.sql(
+                "CALL sys.compact_chain_table(table => 'my_db1.chain_dv_t1', partition => 'date=\"20260224\"')");
+
+        assertThat(
+                        spark
+                                .sql(
+                                        "SELECT * FROM `my_db1`.`chain_dv_t1$branch_snapshot` WHERE date = '20260224'")
+                                .collectAsList().stream()
+                                .map(Row::toString)
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder(
+                        "[1,3,3,CN,20260224]",
+                        "[2,2,2,CN,20260224]",
+                        "[5,1,1,CN,20260224]",
+                        "[11,1,1,US,20260224]",
+                        "[12,1,1,US,20260224]");
+
+        spark.sql("DROP TABLE IF EXISTS `my_db1`.`chain_dv_t1`;");
         spark.close();
     }
 }

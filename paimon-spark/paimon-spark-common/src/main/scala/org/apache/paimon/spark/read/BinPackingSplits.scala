@@ -43,31 +43,11 @@ case class BinPackingSplits(coreOptions: CoreOptions, readRowSizeRatio: Double =
 
   private lazy val deletionVectors: Boolean = coreOptions.deletionVectorsEnabled()
 
-  private lazy val filesMaxPartitionBytes: Long = {
-    val options = coreOptions.toConfiguration
-    var _filesMaxPartitionBytes = SOURCE_SPLIT_TARGET_SIZE.defaultValue().getBytes
+  private lazy val filesMaxPartitionBytes: Long =
+    BinPackingSplits.filesMaxPartitionBytes(coreOptions, conf)
 
-    if (conf.contains(SQLConf.FILES_MAX_PARTITION_BYTES.key)) {
-      _filesMaxPartitionBytes = conf.getConf(SQLConf.FILES_MAX_PARTITION_BYTES)
-    }
-    if (options.containsKey(SOURCE_SPLIT_TARGET_SIZE.key())) {
-      _filesMaxPartitionBytes = options.get(SOURCE_SPLIT_TARGET_SIZE).getBytes
-    }
-    _filesMaxPartitionBytes
-  }
-
-  private lazy val openCostInBytes: Long = {
-    val options = coreOptions.toConfiguration
-    var _openCostBytes = SOURCE_SPLIT_OPEN_FILE_COST.defaultValue().getBytes
-
-    if (conf.contains(SQLConf.FILES_OPEN_COST_IN_BYTES.key)) {
-      _openCostBytes = conf.getConf(SQLConf.FILES_OPEN_COST_IN_BYTES)
-    }
-    if (options.containsKey(SOURCE_SPLIT_OPEN_FILE_COST.key())) {
-      _openCostBytes = options.get(SOURCE_SPLIT_OPEN_FILE_COST).getBytes
-    }
-    _openCostBytes
-  }
+  private lazy val openCostInBytes: Long =
+    BinPackingSplits.openCostInBytes(coreOptions, conf)
 
   private lazy val leafNodeDefaultParallelism: Int = {
     conf
@@ -78,14 +58,19 @@ case class BinPackingSplits(coreOptions: CoreOptions, readRowSizeRatio: Double =
   def pack(splits: Array[Split]): Seq[PaimonInputPartition] = {
     val (toReshuffle, reserved) = splits.partition {
       case _: FallbackSplit => false
-      case split: DataSplit => split.rawConvertible()
-      // Currently, format table reader only supports reading one file.
+      case split: DataSplit => split.rawConvertible() || coreOptions.dataEvolutionEnabled()
+      // FormatDataSplit is already packed with multiple files by target size in the core scan,
+      // so each split maps directly to one input partition here.
       case _: FormatDataSplit => false
       case _ => false
     }
     if (toReshuffle.nonEmpty) {
       val startTS = System.currentTimeMillis()
-      val reshuffled = packDataSplit(toReshuffle.collect { case ds: DataSplit => ds })
+      val reshuffled = if (coreOptions.dataEvolutionEnabled()) {
+        packDataEvolutionSplit(toReshuffle.collect { case ds: DataSplit => ds })
+      } else {
+        packDataSplit(toReshuffle.collect { case ds: DataSplit => ds })
+      }
       val all = reserved.map(PaimonInputPartition.apply) ++ reshuffled
       val duration = System.currentTimeMillis() - startTS
       logInfo(
@@ -156,6 +141,41 @@ case class BinPackingSplits(coreOptions: CoreOptions, readRowSizeRatio: Double =
     partitions.toArray
   }
 
+  private def packDataEvolutionSplit(splits: Array[DataSplit]): Array[PaimonInputPartition] = {
+    val maxSplitBytes = computeMaxSplitBytes(splits)
+
+    var currentSize = 0L
+    val currentSplits = new ArrayBuffer[DataSplit]
+    val partitions = new ArrayBuffer[PaimonInputPartition]
+
+    def closeInputPartition(): Unit = {
+      if (currentSplits.nonEmpty) {
+        partitions += PaimonInputPartition(currentSplits.toArray)
+        currentSplits.clear()
+        currentSize = 0L
+      }
+    }
+
+    splits.foreach {
+      split =>
+        val ddFiles = dataFileAndDeletionFiles(split)
+        val size = ddFiles.map {
+          case (dataFile, deletionFile) =>
+            (dataFile.fileSize() * readRowSizeRatio).toLong + openCostInBytes + Option(deletionFile)
+              .map(_.length())
+              .getOrElse(0L)
+        }.sum
+        if (currentSplits.nonEmpty && currentSize + size > maxSplitBytes) {
+          closeInputPartition()
+        }
+        currentSplits += split
+        currentSize += size
+    }
+
+    closeInputPartition()
+    partitions.toArray
+  }
+
   private def copyDataSplit(
       split: DataSplit,
       dataFiles: Seq[DataFileMeta],
@@ -192,8 +212,7 @@ case class BinPackingSplits(coreOptions: CoreOptions, readRowSizeRatio: Double =
     val defaultMaxSplitBytes = filesMaxPartitionBytes
     val minPartitionNum = conf.filesMinPartitionNum.getOrElse(leafNodeDefaultParallelism)
 
-    val totalRawBytes =
-      dataSplits.map(s => SplitUtils.splitSize(s) + SplitUtils.fileCount(s) * openCostInBytes).sum
+    val totalRawBytes = BinPackingSplits.estimatedSize(dataSplits, openCostInBytes)
     val bytesPerCore = totalRawBytes / minPartitionNum
 
     val maxSplitBytes = Math.min(defaultMaxSplitBytes, Math.max(openCostInBytes, bytesPerCore))
@@ -204,5 +223,36 @@ case class BinPackingSplits(coreOptions: CoreOptions, readRowSizeRatio: Double =
         s"final max split bytes: $maxSplitBytes")
 
     maxSplitBytes
+  }
+}
+
+object BinPackingSplits {
+
+  private[spark] def filesMaxPartitionBytes(coreOptions: CoreOptions, conf: SQLConf): Long = {
+    val options = coreOptions.toConfiguration
+    if (options.containsKey(SOURCE_SPLIT_TARGET_SIZE.key())) {
+      options.get(SOURCE_SPLIT_TARGET_SIZE).getBytes
+    } else if (conf.contains(SQLConf.FILES_MAX_PARTITION_BYTES.key)) {
+      conf.getConf(SQLConf.FILES_MAX_PARTITION_BYTES)
+    } else {
+      SOURCE_SPLIT_TARGET_SIZE.defaultValue().getBytes
+    }
+  }
+
+  private[spark] def openCostInBytes(coreOptions: CoreOptions, conf: SQLConf): Long = {
+    val options = coreOptions.toConfiguration
+    if (options.containsKey(SOURCE_SPLIT_OPEN_FILE_COST.key())) {
+      options.get(SOURCE_SPLIT_OPEN_FILE_COST).getBytes
+    } else if (conf.contains(SQLConf.FILES_OPEN_COST_IN_BYTES.key)) {
+      conf.getConf(SQLConf.FILES_OPEN_COST_IN_BYTES)
+    } else {
+      SOURCE_SPLIT_OPEN_FILE_COST.defaultValue().getBytes
+    }
+  }
+
+  private[spark] def estimatedSize(splits: Iterable[Split], openCostInBytes: Long): Long = {
+    splits
+      .map(split => SplitUtils.splitSize(split) + SplitUtils.fileCount(split) * openCostInBytes)
+      .sum
   }
 }

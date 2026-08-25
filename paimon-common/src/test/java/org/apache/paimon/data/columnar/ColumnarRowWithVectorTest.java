@@ -18,10 +18,15 @@
 
 package org.apache.paimon.data.columnar;
 
+import org.apache.paimon.data.BlobDescriptor;
 import org.apache.paimon.data.InternalVector;
+import org.apache.paimon.data.columnar.heap.HeapBytesVector;
 import org.apache.paimon.data.columnar.heap.HeapFloatVector;
+import org.apache.paimon.utils.IOUtils;
 
 import org.junit.jupiter.api.Test;
+
+import java.io.IOException;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -40,6 +45,33 @@ public class ColumnarRowWithVectorTest {
 
         row.setRowId(1);
         assertThat(row.getVector(0).toFloatArray()).isEqualTo(new float[] {4.0f, 5.0f, 6.0f});
+    }
+
+    @Test
+    public void testVectorReadAsArray() {
+        // VECTOR is exposed as ARRAY (e.g. Flink maps VECTOR -> ARRAY), so it is read via
+        // getArray; a vector is an array, so this must not throw a ClassCastException.
+        float[] values = new float[] {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
+        VectorizedColumnBatch batch = makeColumnBatch(values, 2, null);
+
+        ColumnarRow row = new ColumnarRow(batch);
+        row.setRowId(0);
+        assertThat(row.getArray(0).toFloatArray()).isEqualTo(new float[] {1.0f, 2.0f, 3.0f});
+
+        row.setRowId(1);
+        assertThat(row.getArray(0).toFloatArray()).isEqualTo(new float[] {4.0f, 5.0f, 6.0f});
+    }
+
+    @Test
+    public void testNestedVectorReadAsArray() {
+        // Nested VECTOR (ARRAY<VECTOR>/MAP<..,VECTOR>) reads via ColumnarArray.getArray.
+        float[] values = new float[] {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
+        VectorizedColumnBatch batch = makeColumnBatch(values, 2, null);
+        VecColumnVector vectorColumn = (VecColumnVector) batch.columns[0];
+
+        ColumnarArray outer = new ColumnarArray(vectorColumn, 0, 2);
+        assertThat(outer.getArray(0).toFloatArray()).isEqualTo(new float[] {1.0f, 2.0f, 3.0f});
+        assertThat(outer.getArray(1).toFloatArray()).isEqualTo(new float[] {4.0f, 5.0f, 6.0f});
     }
 
     @Test
@@ -74,6 +106,26 @@ public class ColumnarRowWithVectorTest {
         assertThatThrownBy(() -> row.getVector(0))
                 .isInstanceOf(UnsupportedOperationException.class)
                 .hasMessageContaining("refuse null elements");
+    }
+
+    @Test
+    public void testBlobAccessUsesReferenceBytes() throws IOException {
+        byte[] serialized =
+                IOUtils.readFully(
+                        ColumnarRowWithVectorTest.class
+                                .getClassLoader()
+                                .getResourceAsStream("compatible/blob_descriptor_v1"),
+                        true);
+
+        HeapBytesVector vector = new HeapBytesVector(1);
+        vector.putByteArray(0, serialized, 0, serialized.length);
+        VectorizedColumnBatch batch = new VectorizedColumnBatch(new ColumnVector[] {vector});
+        batch.setNumRows(1);
+
+        ColumnarRow row = new ColumnarRow(batch);
+        row.setRowId(0);
+
+        assertThat(row.getBlob(0).toDescriptor()).isEqualTo(BlobDescriptor.deserialize(serialized));
     }
 
     private VectorizedColumnBatch makeColumnBatch(float[] values, int numRows, boolean[] nulls) {

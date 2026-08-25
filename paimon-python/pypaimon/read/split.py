@@ -1,20 +1,19 @@
-################################################################################
-#  Licensed to the Apache Software Foundation (ASF) under one
-#  or more contributor license agreements.  See the NOTICE file
-#  distributed with this work for additional information
-#  regarding copyright ownership.  The ASF licenses this file
-#  to you under the Apache License, Version 2.0 (the
-#  "License"); you may not use this file except in compliance
-#  with the License.  You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-#      http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-# limitations under the License.
-################################################################################
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 from abc import ABC, abstractmethod
 from typing import List, Optional, Callable
@@ -79,13 +78,16 @@ class DataSplit(Split):
         partition: GenericRow,
         bucket: int,
         raw_convertible: bool = False,
-        data_deletion_files: Optional[List[DeletionFile]] = None
+        data_deletion_files: Optional[List[DeletionFile]] = None,
+        snapshot_id: Optional[int] = None
     ):
         self._files = files
         self._partition = partition
         self._bucket = bucket
         self.raw_convertible = raw_convertible
         self.data_deletion_files = data_deletion_files
+        # Scanned snapshot; None unless populated (e.g. by the native planner).
+        self.snapshot_id = snapshot_id
 
     @property
     def files(self) -> List[DataFileMeta]:
@@ -122,7 +124,8 @@ class DataSplit(Split):
             partition=self._partition,
             bucket=self._bucket,
             raw_convertible=self.raw_convertible,
-            data_deletion_files=filtered_data_deletion_files
+            data_deletion_files=filtered_data_deletion_files,
+            snapshot_id=self.snapshot_id
         )
 
     @property
@@ -185,6 +188,10 @@ class DataSplit(Split):
         for file in self._files:
             if file.first_row_id is None:
                 return False
+        if self.data_deletion_files is not None:
+            for deletion_file in self.data_deletion_files:
+                if deletion_file is not None and deletion_file.cardinality is None:
+                    return False
         return True
 
     def _data_evolution_merged_row_count(self) -> int:
@@ -199,4 +206,11 @@ class DataSplit(Split):
             return 0
 
         ranges = Range.sort_and_merge_overlap(file_ranges, True, True)
-        return sum([r.count() for r in ranges])
+        row_count = sum([r.count() for r in ranges])
+        if self.data_deletion_files is not None:
+            row_count -= sum(
+                deletion_file.cardinality
+                for deletion_file in self.data_deletion_files
+                if deletion_file is not None
+            )
+        return row_count

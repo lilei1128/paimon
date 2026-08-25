@@ -36,8 +36,7 @@ import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.InternalRowUtils;
 import org.apache.paimon.utils.JsonSerdeUtil;
-
-import org.apache.paimon.shade.org.apache.commons.lang3.StringUtils;
+import org.apache.paimon.utils.StringUtils;
 
 import javax.annotation.Nullable;
 
@@ -107,6 +106,16 @@ public class TableQueryAuthResult implements Serializable {
         return rowFilter;
     }
 
+    /**
+     * Remap the auth predicate's field references by name to positional indices of {@code rowType}.
+     * The auth server sends field-id-based {@link org.apache.paimon.predicate.FieldRef}s, which
+     * must be resolved by name before positional evaluation.
+     */
+    @Nullable
+    public static Predicate remapPredicate(Predicate predicate, RowType rowType) {
+        return predicate.visit(new PredicateRemapper(rowType));
+    }
+
     public Map<String, Transform> extractColumnMasking() {
         Map<String, Transform> result = new TreeMap<>();
         if (columnMasking != null && !columnMasking.isEmpty()) {
@@ -130,7 +139,7 @@ public class TableQueryAuthResult implements Serializable {
             RecordReader<InternalRow> reader, RowType outputRowType) {
         Predicate rowFilter = extractPredicate();
         if (rowFilter != null) {
-            Predicate remappedFilter = rowFilter.visit(new PredicateRemapper(outputRowType));
+            Predicate remappedFilter = remapPredicate(rowFilter, outputRowType);
             if (remappedFilter != null) {
                 reader = reader.filter(remappedFilter::test);
             }

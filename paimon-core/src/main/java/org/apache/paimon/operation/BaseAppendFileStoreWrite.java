@@ -33,8 +33,11 @@ import org.apache.paimon.format.FileFormat;
 import org.apache.paimon.fs.FileIO;
 import org.apache.paimon.io.BundleRecords;
 import org.apache.paimon.io.DataFileMeta;
+import org.apache.paimon.io.DataFilePathFactory;
 import org.apache.paimon.io.RowDataRollingFileWriter;
 import org.apache.paimon.manifest.FileSource;
+import org.apache.paimon.metrics.MetricRegistry;
+import org.apache.paimon.operation.metrics.BlobFetchMetrics;
 import org.apache.paimon.reader.RecordReaderIterator;
 import org.apache.paimon.statistics.SimpleColStatsCollector;
 import org.apache.paimon.types.RowType;
@@ -80,8 +83,10 @@ public abstract class BaseAppendFileStoreWrite extends MemoryFileStoreWrite<Inte
     private final RowType rowType;
 
     private @Nullable BlobFileContext blobContext;
+    private @Nullable BlobFetchMetrics blobFetchMetrics;
     private RowType writeType;
     private @Nullable List<String> writeCols;
+    private FileSource fileSource = FileSource.APPEND;
     private boolean forceBufferSpill = false;
 
     public BaseAppendFileStoreWrite(
@@ -96,7 +101,15 @@ public abstract class BaseAppendFileStoreWrite extends MemoryFileStoreWrite<Inte
             CoreOptions options,
             @Nullable BucketedDvMaintainer.Factory dvMaintainerFactory,
             String tableName) {
-        super(snapshotManager, scan, options, partitionType, null, dvMaintainerFactory, tableName);
+        super(
+                snapshotManager,
+                scan,
+                options,
+                partitionType,
+                null,
+                dvMaintainerFactory,
+                null,
+                tableName);
         this.fileIO = fileIO;
         this.readForCompact = readForCompact;
         this.schemaId = schemaId;
@@ -118,6 +131,16 @@ public abstract class BaseAppendFileStoreWrite extends MemoryFileStoreWrite<Inte
     }
 
     @Override
+    public BaseAppendFileStoreWrite withMetricRegistry(MetricRegistry metricRegistry) {
+        super.withMetricRegistry(metricRegistry);
+        if (blobContext != null) {
+            blobFetchMetrics = new BlobFetchMetrics(metricRegistry, tableName);
+            blobContext = blobContext.withBlobFetchMetricReporter(blobFetchMetrics);
+        }
+        return this;
+    }
+
+    @Override
     protected RecordWriter<InternalRow> createWriter(
             BinaryRow partition,
             int bucket,
@@ -125,14 +148,20 @@ public abstract class BaseAppendFileStoreWrite extends MemoryFileStoreWrite<Inte
             long restoredMaxSeqNumber,
             @Nullable CommitIncrement restoreIncrement,
             ExecutorService compactExecutor,
-            @Nullable BucketedDvMaintainer dvMaintainer) {
+            @Nullable BucketedDvMaintainer dvMaintainer,
+            boolean ignorePreviousFiles) {
+        DataFilePathFactory dataPathFactory =
+                pathFactory.createDataFilePathFactory(partition, bucket);
         return new AppendOnlyWriter(
                 fileIO,
                 ioManager,
                 schemaId,
                 fileFormat,
+                FileFormat.vectorFileFormat(options),
                 options.targetFileSize(false),
                 options.blobTargetFileSize(),
+                options.vectorTargetFileSize(),
+                options.targetFileRowNum(),
                 writeType,
                 writeCols,
                 restoredMaxSeqNumber,
@@ -140,7 +169,7 @@ public abstract class BaseAppendFileStoreWrite extends MemoryFileStoreWrite<Inte
                 // it is only for new files, no dv
                 files -> createFilesIterator(partition, bucket, files, null),
                 options.commitForceCompact(),
-                pathFactory.createDataFilePathFactory(partition, bucket),
+                dataPathFactory,
                 restoreIncrement,
                 options.useWriteBufferForAppend() || forceBufferSpill,
                 options.writeBufferSpillable() || forceBufferSpill,
@@ -152,7 +181,14 @@ public abstract class BaseAppendFileStoreWrite extends MemoryFileStoreWrite<Inte
                 options.asyncFileWrite(),
                 options.statsDenseStore(),
                 options.dataEvolutionEnabled(),
-                blobContext);
+                rowSidecarFileFormat(),
+                blobContext,
+                fileSource);
+    }
+
+    public BaseAppendFileStoreWrite withFileSource(FileSource fileSource) {
+        this.fileSource = fileSource;
+        return this;
     }
 
     @Override
@@ -173,6 +209,14 @@ public abstract class BaseAppendFileStoreWrite extends MemoryFileStoreWrite<Inte
 
     private SimpleColStatsCollector.Factory[] statsCollectors() {
         return createStatsFactories(options.statsMode(), options, writeType.getFieldNames());
+    }
+
+    @Override
+    public void close() throws Exception {
+        super.close();
+        if (blobFetchMetrics != null) {
+            blobFetchMetrics.close();
+        }
     }
 
     protected abstract CompactManager getCompactManager(
@@ -275,7 +319,16 @@ public abstract class BaseAppendFileStoreWrite extends MemoryFileStoreWrite<Inte
                 FileSource.COMPACT,
                 options.asyncFileWrite(),
                 options.statsDenseStore(),
-                rowType.equals(writeType) ? null : writeType.getFieldNames());
+                rowType.equals(writeType) ? null : writeType.getFieldNames(),
+                rowSidecarFileFormat(),
+                Long.MAX_VALUE);
+    }
+
+    @Nullable
+    private FileFormat rowSidecarFileFormat() {
+        return options.dataEvolutionEnabled() && options.dataEvolutionRowSidecarEnabled()
+                ? FileFormat.fromIdentifier("row", options.toConfiguration())
+                : null;
     }
 
     private RecordReaderIterator<InternalRow> createFilesIterator(

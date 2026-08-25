@@ -23,6 +23,7 @@ import org.apache.paimon.Snapshot;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.flink.sink.Committable;
 import org.apache.paimon.flink.utils.BoundedOneInputOperator;
+import org.apache.paimon.flink.utils.RuntimeContextUtils;
 import org.apache.paimon.index.GlobalIndexMeta;
 import org.apache.paimon.index.IndexFileMeta;
 import org.apache.paimon.io.CompactIncrement;
@@ -70,7 +71,7 @@ public class MergeIntoUpdateChecker extends BoundedOneInputOperator<Committable,
         affectedPartitions = new HashSet<>();
 
         Preconditions.checkState(
-                getRuntimeContext().getTaskInfo().getNumberOfParallelSubtasks() == 1,
+                RuntimeContextUtils.getNumberOfParallelSubtasks(getRuntimeContext()) == 1,
                 "Parallelism of MergeIntoUpdateChecker must be 1.");
     }
 
@@ -86,6 +87,12 @@ public class MergeIntoUpdateChecker extends BoundedOneInputOperator<Committable,
     }
 
     private void checkUpdatedColumns() {
+        CoreOptions.GlobalIndexColumnUpdateAction updateAction =
+                table.coreOptions().globalIndexColumnUpdateAction();
+        if (updateAction == CoreOptions.GlobalIndexColumnUpdateAction.IGNORE) {
+            return;
+        }
+
         Optional<Snapshot> latestSnapshot = table.latestSnapshot();
         RowType rowType = table.rowType();
         Preconditions.checkState(latestSnapshot.isPresent());
@@ -99,24 +106,24 @@ public class MergeIntoUpdateChecker extends BoundedOneInputOperator<Committable,
                                     GlobalIndexMeta globalIndexMeta =
                                             entry.indexFile().globalIndexMeta();
                                     if (globalIndexMeta != null) {
-                                        String fieldName =
-                                                rowType.getField(globalIndexMeta.indexFieldId())
-                                                        .name();
-                                        return updatedColumns.contains(fieldName)
+                                        List<String> indexedNames =
+                                                globalIndexMeta.getIndexedFieldNames(rowType);
+                                        boolean overlaps =
+                                                indexedNames.stream()
+                                                        .anyMatch(updatedColumns::contains);
+                                        return overlaps
                                                 && affectedPartitions.contains(entry.partition());
                                     }
                                     return false;
                                 });
 
         if (!affectedEntries.isEmpty()) {
-            CoreOptions.GlobalIndexColumnUpdateAction updateAction =
-                    table.coreOptions().globalIndexColumnUpdateAction();
             switch (updateAction) {
                 case THROW_ERROR:
                     Set<String> conflictedColumns =
                             affectedEntries.stream()
-                                    .map(file -> file.indexFile().globalIndexMeta().indexFieldId())
-                                    .map(id -> rowType.getField(id).name())
+                                    .map(file -> file.indexFile().globalIndexMeta())
+                                    .flatMap(meta -> meta.getIndexedFieldNames(rowType).stream())
                                     .collect(Collectors.toSet());
 
                     throw new RuntimeException(

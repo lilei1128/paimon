@@ -72,7 +72,7 @@ import java.util.function.Supplier;
 
 import static org.apache.paimon.CoreOptions.ChangelogProducer.FULL_COMPACTION;
 import static org.apache.paimon.CoreOptions.MergeEngine.DEDUPLICATE;
-import static org.apache.paimon.lookup.LookupStoreFactory.bfGenerator;
+import static org.apache.paimon.lookup.LookupStoreFactory.bloomFilterBuilderFactory;
 import static org.apache.paimon.mergetree.LookupFile.localFilePrefix;
 
 /** Factory to create {@link MergeTreeCompactManager}. */
@@ -147,12 +147,13 @@ public class MergeTreeCompactManagerFactory implements KvCompactionManagerFactor
             int bucket,
             ExecutorService compactExecutor,
             List<DataFileMeta> restoreFiles,
-            @Nullable BucketedDvMaintainer dvMaintainer) {
+            @Nullable BucketedDvMaintainer dvMaintainer,
+            boolean ignorePreviousFiles) {
         if (options.writeOnly()) {
             return new NoopCompactManager();
         }
 
-        CompactStrategy compactStrategy = createCompactStrategy(options);
+        CompactStrategy compactStrategy = createCompactStrategy(options, restoreFiles);
         Comparator<InternalRow> keyComparator = keyComparatorSupplier.get();
         Levels levels = new Levels(keyComparator, restoreFiles, options.numLevels());
         @Nullable FieldsComparator userDefinedSeqComparator = udsComparatorSupplier.get();
@@ -163,13 +164,20 @@ public class MergeTreeCompactManagerFactory implements KvCompactionManagerFactor
                         keyComparator,
                         userDefinedSeqComparator,
                         levels,
-                        dvMaintainer);
+                        dvMaintainer,
+                        ignorePreviousFiles);
         CompactionMetrics.Reporter metricsReporter =
                 compactionMetrics == null
                         ? null
                         : compactionMetrics.createReporter(partition, bucket);
         if (metricsReporter != null) {
             rewriter.setMetricsReporter(metricsReporter);
+        }
+        String bucketInfo = "bucket=" + bucket;
+        if (partition.getFieldCount() > 0) {
+            String partitionString =
+                    readerFactoryBuilder.pathFactory().getPartitionString(partition);
+            bucketInfo = String.format("partition=%s, ", partitionString) + bucketInfo;
         }
         return new MergeTreeCompactManager(
                 compactExecutor,
@@ -185,10 +193,14 @@ public class MergeTreeCompactManagerFactory implements KvCompactionManagerFactor
                 options.needLookup(),
                 recordLevelExpire,
                 options.forceRewriteAllFiles(),
-                options.isChainTable());
+                options.isChainTable(),
+                bucketInfo);
     }
 
-    private CompactStrategy createCompactStrategy(CoreOptions options) {
+    private CompactStrategy createCompactStrategy(
+            CoreOptions options, List<DataFileMeta> restoreFiles) {
+        Long initialLastFullCompaction =
+                estimateLastFullCompactionTime(restoreFiles, options.numLevels());
         if (options.needLookup()) {
             Integer compactMaxInterval = null;
             switch (options.lookupCompact()) {
@@ -203,7 +215,7 @@ public class MergeTreeCompactManagerFactory implements KvCompactionManagerFactor
                             options.maxSizeAmplificationPercent(),
                             options.sortedRunSizeRatio(),
                             options.numSortedRunCompactionTrigger(),
-                            EarlyFullCompaction.create(options),
+                            EarlyFullCompaction.create(options, initialLastFullCompaction),
                             OffPeakHours.create(options)),
                     compactMaxInterval);
         }
@@ -213,7 +225,7 @@ public class MergeTreeCompactManagerFactory implements KvCompactionManagerFactor
                         options.maxSizeAmplificationPercent(),
                         options.sortedRunSizeRatio(),
                         options.numSortedRunCompactionTrigger(),
-                        EarlyFullCompaction.create(options),
+                        EarlyFullCompaction.create(options, initialLastFullCompaction),
                         OffPeakHours.create(options));
         if (options.compactionForceUpLevel0()) {
             return new ForceUpLevel0Compaction(universal, null);
@@ -222,13 +234,30 @@ public class MergeTreeCompactManagerFactory implements KvCompactionManagerFactor
         }
     }
 
+    @Nullable
+    private static Long estimateLastFullCompactionTime(
+            List<DataFileMeta> restoreFiles, int numLevels) {
+        int maxLevel = numLevels - 1;
+        long max = -1;
+        for (DataFileMeta f : restoreFiles) {
+            if (f.level() == maxLevel) {
+                long t = f.creationTimeEpochMillis();
+                if (t > max) {
+                    max = t;
+                }
+            }
+        }
+        return max < 0 ? null : max;
+    }
+
     private MergeTreeCompactRewriter createRewriter(
             BinaryRow partition,
             int bucket,
             Comparator<InternalRow> keyComparator,
             @Nullable FieldsComparator userDefinedSeqComparator,
             Levels levels,
-            @Nullable BucketedDvMaintainer dvMaintainer) {
+            @Nullable BucketedDvMaintainer dvMaintainer,
+            boolean ignorePreviousFiles) {
         DeletionVector.Factory dvFactory = DeletionVector.factory(dvMaintainer);
         KeyValueFileReaderFactory keyReaderFactory =
                 readerFactoryBuilder.build(partition, bucket, dvFactory);
@@ -312,7 +341,7 @@ public class MergeTreeCompactManagerFactory implements KvCompactionManagerFactor
                     mfFactory,
                     mergeSorter,
                     wrapperFactory,
-                    lookupStrategy.produceChangelog,
+                    lookupStrategy.produceChangelog && !ignorePreviousFiles,
                     dvMaintainer,
                     options,
                     remoteLookupFileManager);
@@ -364,7 +393,7 @@ public class MergeTreeCompactManagerFactory implements KvCompactionManagerFactor
                                         localFilePrefix(partitionType, partition, bucket, file))
                                 .getPathFile(),
                 lookupStoreFactory,
-                bfGenerator(options),
+                bloomFilterBuilderFactory(options),
                 lookupFileCache);
     }
 

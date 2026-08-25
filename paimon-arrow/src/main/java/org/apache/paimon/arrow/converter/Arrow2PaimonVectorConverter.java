@@ -57,6 +57,8 @@ import org.apache.paimon.types.DateType;
 import org.apache.paimon.types.DecimalType;
 import org.apache.paimon.types.DoubleType;
 import org.apache.paimon.types.FloatType;
+import org.apache.paimon.types.GeographyType;
+import org.apache.paimon.types.GeometryType;
 import org.apache.paimon.types.IntType;
 import org.apache.paimon.types.LocalZonedTimestampType;
 import org.apache.paimon.types.MapType;
@@ -82,7 +84,10 @@ import org.apache.arrow.vector.Float4Vector;
 import org.apache.arrow.vector.Float8Vector;
 import org.apache.arrow.vector.IntVector;
 import org.apache.arrow.vector.SmallIntVector;
+import org.apache.arrow.vector.TimeMicroVector;
 import org.apache.arrow.vector.TimeMilliVector;
+import org.apache.arrow.vector.TimeNanoVector;
+import org.apache.arrow.vector.TimeSecVector;
 import org.apache.arrow.vector.TimeStampVector;
 import org.apache.arrow.vector.TinyIntVector;
 import org.apache.arrow.vector.VarBinaryVector;
@@ -195,7 +200,12 @@ public interface Arrow2PaimonVectorConverter {
 
                         @Override
                         public Bytes getBytes(int index) {
-                            byte[] bytes = ((VarBinaryVector) vector).getObject(index);
+                            byte[] bytes;
+                            if (vector instanceof FixedSizeBinaryVector) {
+                                bytes = ((FixedSizeBinaryVector) vector).get(index);
+                            } else {
+                                bytes = ((VarBinaryVector) vector).getObject(index);
+                            }
                             return new Bytes(bytes, 0, bytes.length) {
                                 @Override
                                 public byte[] getBytes() {
@@ -227,6 +237,16 @@ public interface Arrow2PaimonVectorConverter {
                             };
                         }
                     };
+        }
+
+        @Override
+        public Arrow2PaimonVectorConverter visit(GeometryType geometryType) {
+            return visit(new VarBinaryType(geometryType.isNullable(), VarBinaryType.MAX_LENGTH));
+        }
+
+        @Override
+        public Arrow2PaimonVectorConverter visit(GeographyType geographyType) {
+            return visit(new VarBinaryType(geographyType.isNullable(), VarBinaryType.MAX_LENGTH));
         }
 
         @Override
@@ -378,7 +398,7 @@ public interface Arrow2PaimonVectorConverter {
 
                         @Override
                         public int getInt(int index) {
-                            return ((TimeMilliVector) vector).get(index);
+                            return getTimeInMillis(vector, index);
                         }
                     };
         }
@@ -396,16 +416,7 @@ public interface Arrow2PaimonVectorConverter {
                         @Override
                         public Timestamp getTimestamp(int i, int precision) {
                             long value = ((TimeStampVector) vector).get(i);
-                            if (precision == 0) {
-                                return Timestamp.fromEpochMillis(value * 1000);
-                            } else if (precision >= 1 && precision <= 3) {
-                                return Timestamp.fromEpochMillis(value);
-                            } else if (precision >= 4 && precision <= 6) {
-                                return Timestamp.fromMicros(value);
-                            } else {
-                                return Timestamp.fromEpochMillis(
-                                        value / 1_000_000, (int) (value % 1_000_000));
-                            }
+                            return convertEpochToTimestamp(value, precision);
                         }
                     };
         }
@@ -422,19 +433,38 @@ public interface Arrow2PaimonVectorConverter {
 
                         @Override
                         public Timestamp getTimestamp(int i, int precision) {
-                            long value = (long) vector.getObject(i);
-                            if (precision == 0) {
-                                return Timestamp.fromEpochMillis(value * 1000);
-                            } else if (precision >= 1 && precision <= 3) {
-                                return Timestamp.fromEpochMillis(value);
-                            } else if (precision >= 4 && precision <= 6) {
-                                return Timestamp.fromMicros(value);
-                            } else {
-                                return Timestamp.fromEpochMillis(
-                                        value / 1_000_000, (int) (value % 1_000_000));
-                            }
+                            long value = ((TimeStampVector) vector).get(i);
+                            return convertEpochToTimestamp(value, precision);
                         }
                     };
+        }
+
+        private int getTimeInMillis(FieldVector vector, int index) {
+            if (vector instanceof TimeMilliVector) {
+                return ((TimeMilliVector) vector).get(index);
+            } else if (vector instanceof TimeMicroVector) {
+                return (int) (((TimeMicroVector) vector).get(index) / 1_000);
+            } else if (vector instanceof TimeNanoVector) {
+                return (int) (((TimeNanoVector) vector).get(index) / 1_000_000);
+            } else if (vector instanceof TimeSecVector) {
+                return ((TimeSecVector) vector).get(index) * 1_000;
+            } else {
+                throw new UnsupportedOperationException(
+                        "Unsupported Arrow time vector: " + vector.getClass().getName());
+            }
+        }
+
+        private Timestamp convertEpochToTimestamp(long value, int precision) {
+            if (precision == 0) {
+                return Timestamp.fromEpochMillis(value * 1000);
+            } else if (precision >= 1 && precision <= 3) {
+                return Timestamp.fromEpochMillis(value);
+            } else if (precision >= 4 && precision <= 6) {
+                return Timestamp.fromMicros(value);
+            } else {
+                return Timestamp.fromEpochMillis(
+                        Math.floorDiv(value, 1_000_000L), (int) Math.floorMod(value, 1_000_000L));
+            }
         }
 
         @Override

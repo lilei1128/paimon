@@ -28,6 +28,7 @@ import org.apache.paimon.mergetree.compact.MergeFunctionWrapper;
 import org.apache.paimon.operation.MergeFileSplitRead;
 import org.apache.paimon.operation.SplitRead;
 import org.apache.paimon.predicate.Predicate;
+import org.apache.paimon.reader.ReadBatchSizer;
 import org.apache.paimon.reader.RecordReader;
 import org.apache.paimon.table.source.IncrementalSplit;
 import org.apache.paimon.table.source.KeyValueTableRead;
@@ -81,6 +82,12 @@ public class IncrementalDiffSplitRead implements SplitRead<InternalRow> {
     @Override
     public SplitRead<InternalRow> withFilter(@Nullable Predicate predicate) {
         mergeRead.withFilter(predicate);
+        return this;
+    }
+
+    @Override
+    public SplitRead<InternalRow> withReadBatchSizer(ReadBatchSizer sizer) {
+        mergeRead.withReadBatchSizer(sizer);
         return this;
     }
 
@@ -206,10 +213,8 @@ public class IncrementalDiffSplitRead implements SplitRead<InternalRow> {
             } else if (kvs.size() == 2) {
                 KeyValue before = kvs.get(0);
                 KeyValue after = kvs.get(1);
-                if (after.level() == AFTER_LEVEL) {
-                    if (!valueAndRowKindEquals(before, after)) {
-                        toReturn = after;
-                    }
+                if (!valueAndRowKindEquals(before, after)) {
+                    toReturn = after.level() == AFTER_LEVEL ? after : before;
                 }
             } else {
                 throw new IllegalArgumentException("Illegal kv number: " + kvs.size());

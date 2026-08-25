@@ -20,6 +20,7 @@ package org.apache.paimon.fs;
 
 import org.apache.paimon.annotation.Public;
 import org.apache.paimon.catalog.CatalogContext;
+import org.apache.paimon.data.BlobDescriptor;
 import org.apache.paimon.fs.hadoop.HadoopFileIOLoader;
 import org.apache.paimon.fs.local.LocalFileIO;
 
@@ -38,6 +39,7 @@ import java.io.OutputStreamWriter;
 import java.io.Serializable;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -245,6 +247,27 @@ public interface FileIO extends Serializable, Closeable {
      * @return <code>true</code> if the renaming was successful, <code>false</code> otherwise
      */
     boolean rename(Path src, Path dst) throws IOException;
+
+    default Optional<Path> archive(Path path, StorageType type) throws IOException {
+        throw new UnsupportedOperationException(
+                getClass().getName() + " does not support archive.");
+    }
+
+    default void restoreArchive(Path path, Duration duration) throws IOException {
+        throw new UnsupportedOperationException(
+                getClass().getName() + " does not support restore archive.");
+    }
+
+    default Optional<Path> unarchive(Path path, StorageType type) throws IOException {
+        throw new UnsupportedOperationException(
+                getClass().getName() + " does not support unarchive.");
+    }
+
+    default String createBlobPresignedUrl(
+            Path tableRoot, BlobDescriptor descriptor, Duration validity) throws IOException {
+        throw new UnsupportedOperationException(
+                getClass().getName() + " does not support creating blob presigned URLs.");
+    }
 
     /**
      * Override this method to empty, many FileIO implementation classes rely on static variables

@@ -25,15 +25,18 @@ import org.apache.paimon.spark.{PaimonFormatTableScan, PaimonHiveTestBase, Paimo
 import org.apache.paimon.spark.PaimonHiveTestBase.hiveUri
 import org.apache.paimon.table.FormatTable
 import org.apache.paimon.table.source.Split
-import org.apache.paimon.utils.CompressUtils
+import org.apache.paimon.utils.{CompressUtils, PartitionPathUtils}
 
 import org.apache.spark.sql.Row
+import org.apache.spark.sql.catalyst.analysis.NoSuchPartitionException
 import org.apache.spark.sql.connector.read.InputPartition
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanHelper
 import org.apache.spark.sql.execution.datasources.v2.BatchScanExec
 
 abstract class FormatTableTestBase extends PaimonHiveTestBase with AdaptiveSparkPlanHelper {
+
+  import testImplicits._
 
   override protected def beforeEach(): Unit = {
     sql(s"USE $paimonHiveCatalogName")
@@ -142,6 +145,56 @@ abstract class FormatTableTestBase extends PaimonHiveTestBase with AdaptiveSpark
     }
   }
 
+  test("Format table: truncate table") {
+    withTable("t") {
+      sql("CREATE TABLE t (id INT, p1 INT, p2 STRING) USING csv PARTITIONED BY (p1, p2)")
+      sql("INSERT INTO t VALUES (1, 1, '1'), (2, 2, '1'), (3, 2, '2')")
+
+      sql("TRUNCATE TABLE t")
+
+      checkAnswer(sql("SELECT * FROM t"), Seq.empty)
+      // Emptying a table does not redefine which partitions it has (SPARK-34418). Here they are
+      // the directories, and those stay.
+      checkAnswer(
+        sql("SHOW PARTITIONS t"),
+        Seq(Row("p1=1/p2=1"), Row("p1=2/p2=1"), Row("p1=2/p2=2")))
+    }
+  }
+
+  test("Format table: truncate partition") {
+    withTable("t") {
+      sql("CREATE TABLE t (id INT, p1 INT, p2 STRING) USING csv PARTITIONED BY (p1, p2)")
+      sql("INSERT INTO t VALUES (1, 1, '1'), (2, 2, '1'), (3, 2, '2')")
+
+      sql("TRUNCATE TABLE t PARTITION (p1 = 2, p2 = '2')")
+      checkAnswer(sql("SELECT * FROM t"), Seq(Row(1, 1, "1"), Row(2, 2, "1")))
+
+      // A partial spec truncates the partitions it covers.
+      sql("TRUNCATE TABLE t PARTITION (p1 = 2)")
+      checkAnswer(sql("SELECT * FROM t"), Seq(Row(1, 1, "1")))
+
+      checkAnswer(
+        sql("SHOW PARTITIONS t"),
+        Seq(Row("p1=1/p2=1"), Row("p1=2/p2=1"), Row("p1=2/p2=2")))
+    }
+  }
+
+  test("Format table: truncate a partition the table does not have") {
+    withTable("t") {
+      sql("CREATE TABLE t (id INT, p1 INT, p2 STRING) USING csv PARTITIONED BY (p1, p2)")
+      sql("INSERT INTO t VALUES (1, 1, '1')")
+
+      // A complete spec matching nothing is an error, as for any other Spark table; a partial one
+      // matching nothing does nothing.
+      intercept[NoSuchPartitionException] {
+        sql("TRUNCATE TABLE t PARTITION (p1 = 9, p2 = '9')")
+      }
+      sql("TRUNCATE TABLE t PARTITION (p1 = 9)")
+
+      checkAnswer(sql("SELECT * FROM t"), Seq(Row(1, 1, "1")))
+    }
+  }
+
   test("Format table: CTAS with partitioned table") {
     withTable("t1", "t2") {
       sql("CREATE TABLE t1 (id INT, p1 INT, p2 INT) USING csv PARTITIONED BY (p1, p2)")
@@ -158,6 +211,48 @@ abstract class FormatTableTestBase extends PaimonHiveTestBase with AdaptiveSpark
     }
   }
 
+  test("Format table: create or replace as select supports table type change") {
+    assume(gteqSpark3_4)
+    withTable("t") {
+      sql("""
+            |CREATE TABLE t (id BIGINT, data STRING)
+            |USING paimon
+            |TBLPROPERTIES ('primary-key' = 'id', 'bucket' = '2')
+            |""".stripMargin)
+      sql("INSERT INTO t VALUES (1, 'old')")
+      Seq((2L, "new")).toDF("id", "data").createOrReplaceTempView("source")
+
+      sql("""
+            |CREATE OR REPLACE TABLE t
+            |USING csv
+            |AS SELECT * FROM source
+            |""".stripMargin)
+
+      assert(paimonCatalog.getTable(Identifier.create(hiveDbName, "t")).isInstanceOf[FormatTable])
+      checkAnswer(sql("SELECT * FROM t"), Seq(Row(2L, "new")))
+    }
+  }
+
+  test("Format table: replace table supports table type change") {
+    assume(gteqSpark3_4)
+    withTable("t") {
+      sql("""
+            |CREATE TABLE t (id BIGINT, data STRING)
+            |USING paimon
+            |TBLPROPERTIES ('primary-key' = 'id', 'bucket' = '2')
+            |""".stripMargin)
+      sql("INSERT INTO t VALUES (1, 'old')")
+
+      sql("""
+            |REPLACE TABLE t (id BIGINT, data STRING)
+            |USING csv
+            |""".stripMargin)
+
+      assert(paimonCatalog.getTable(Identifier.create(hiveDbName, "t")).isInstanceOf[FormatTable])
+      checkAnswer(sql("SELECT * FROM t"), Seq.empty[Row])
+    }
+  }
+
   test("Format table: read compressed files") {
     for (format <- Seq("csv", "json")) {
       withTable("compress_t") {
@@ -170,7 +265,9 @@ abstract class FormatTableTestBase extends PaimonHiveTestBase with AdaptiveSpark
         val fileIO = table.fileIO()
         val file = fileIO
           .listStatus(new Path(table.location()))
-          .filter(file => !file.getPath.getName.startsWith("."))
+          // The same rule the reader applies: a writer's staging directory stays behind, and it
+          // is not a data file.
+          .filter(file => !PartitionPathUtils.isHiddenName(file.getPath.getName))
           .head
           .getPath
           .toUri
@@ -198,6 +295,17 @@ abstract class FormatTableTestBase extends PaimonHiveTestBase with AdaptiveSpark
       sql("INSERT INTO t2 VALUES (1, 1)")
       val df = sql("SELECT t1.f0, t1.f1, t2.f2 FROM t1, t2 WHERE t1.f0 = t2.f0")
       assert(df.queryExecution.executedPlan.toString().contains("BroadcastExchange"))
+    }
+  }
+
+  test("Format table: csv with empty quote-character should fail") {
+    withTable("t") {
+      withSparkSQLConf("spark.paimon.format-table.implementation" -> "paimon") {
+        val error = intercept[IllegalArgumentException] {
+          sql("CREATE TABLE t (f0 INT, f1 STRING) USING CSV OPTIONS ('csv.quote-character' '')")
+        }
+        assert(error.getMessage.contains("csv.quote-character must not be empty"))
+      }
     }
   }
 
@@ -382,6 +490,137 @@ abstract class FormatTableTestBase extends PaimonHiveTestBase with AdaptiveSpark
 
       val filteredSplits = collectFilteredInputSplits(df.queryExecution.executedPlan, "fact_table")
       assert(filteredSplits.size == 2)
+    }
+  }
+
+  test("Paimon format table: runtime filter combined with pushed-down partition filter") {
+    withTable("dwd_fact", "dim_date") {
+      sql("""
+            |CREATE TABLE dwd_fact (id INT, amount DOUBLE, dt STRING, hour STRING)
+            |USING PARQUET
+            |TBLPROPERTIES ('format-table.implementation'='paimon')
+            |PARTITIONED BY (dt, hour)
+            |""".stripMargin)
+      sql("""
+            |CREATE TABLE dim_date (dt STRING, name STRING)
+            |USING PARQUET
+            |TBLPROPERTIES ('format-table.implementation'='paimon')
+            |""".stripMargin)
+
+      sql("""
+            |INSERT INTO dwd_fact VALUES
+            |(1, 10.0, '20260622', '00'),
+            |(2, 20.0, '20260622', '01'),
+            |(3, 30.0, '20260621', '00'),
+            |(4, 40.0, '20260620', '23')
+            |""".stripMargin)
+      sql("INSERT INTO dim_date VALUES ('20260622', 'today')")
+
+      val df = sql("""
+                     |SELECT f.id, f.dt, f.hour, d.name
+                     |FROM dwd_fact f
+                     |JOIN dim_date d ON f.dt = d.dt
+                     |WHERE f.dt >= '20260620'
+                     |ORDER BY f.id
+                     |""".stripMargin)
+
+      checkAnswer(df, Seq(Row(1, "20260622", "00", "today"), Row(2, "20260622", "01", "today")))
+
+      // Static pushdown (dt >= '20260620') alone keeps all 4 partitions; the runtime filter on dt
+      // prunes the scan down to the two partitions of dt='20260622'.
+      val filteredSplits = collectFilteredInputSplits(df.queryExecution.executedPlan, "dwd_fact")
+      assert(filteredSplits.size == 2)
+    }
+  }
+
+  for (onlyValueInPath <- Seq(false, true)) {
+    val suffix = if (onlyValueInPath) " (partition-path-only-value)" else ""
+    test(s"Paimon format table: OR cross-field partition pruning$suffix") {
+      withTable("dwd_fact") {
+        val props =
+          if (onlyValueInPath) {
+            "'format-table.implementation'='paimon', 'format-table.partition-path-only-value'='true'"
+          } else {
+            "'format-table.implementation'='paimon'"
+          }
+        sql(s"""
+               |CREATE TABLE dwd_fact (id INT, amount DOUBLE, dt STRING, hour STRING)
+               |USING PARQUET
+               |TBLPROPERTIES ($props)
+               |PARTITIONED BY (dt, hour)
+               |""".stripMargin)
+
+        sql("""
+              |INSERT INTO dwd_fact VALUES
+              |(1, 10.0, '20260625', '10'),
+              |(2, 20.0, '20260625', '18'),
+              |(3, 30.0, '20260624', '20'),
+              |(4, 40.0, '20260624', '08'),
+              |(5, 50.0, '20260101', '10')
+              |""".stripMargin)
+
+        val df =
+          sql("""
+                |SELECT id, dt, hour FROM dwd_fact
+                |WHERE (dt = '20260625' AND hour < '16') OR (dt = '20260624' AND hour >= '16')
+                |ORDER BY id
+                |""".stripMargin)
+
+        checkAnswer(df, Seq(Row(1, "20260625", "10"), Row(3, "20260624", "20")))
+
+        // The cross-field OR is pushed down as a partition filter, so only the two matching
+        // partitions produce splits. (Pruning effectiveness is covered by FormatTableScanTest.)
+        val filteredSplits = collectFilteredInputSplits(df.queryExecution.executedPlan, "dwd_fact")
+        assert(filteredSplits.size == 2)
+      }
+    }
+  }
+
+  test(
+    "Format table: INSERT OVERWRITE empties an unpartitioned table when the query returns nothing") {
+    withTable("t") {
+      sql("CREATE TABLE t (id INT, payload STRING) USING CSV")
+      sql("INSERT INTO t VALUES (1, 'a'), (2, 'b')")
+
+      sql("INSERT OVERWRITE t SELECT * FROM t WHERE false")
+
+      // An unpartitioned overwrite replaces the table, and it replaces it with nothing here. Left
+      // to the files this commit wrote, an empty query would leave the old rows readable.
+      checkAnswer(sql("SELECT * FROM t"), Seq.empty)
+    }
+  }
+
+  test("Format table: static INSERT OVERWRITE replaces every partition of the table") {
+    withTable("t") {
+      withSQLConf("spark.sql.sources.partitionOverwriteMode" -> "STATIC") {
+        sql("CREATE TABLE t (id INT, dt STRING) USING CSV PARTITIONED BY (dt)")
+        sql("INSERT INTO t VALUES (1, '20260101'), (2, '20260102')")
+
+        sql("INSERT OVERWRITE t VALUES (9, '20260101')")
+
+        // The statement names no partition and the mode is STATIC, so it is about the whole
+        // table: the partition it does not write is replaced too, not left as it was.
+        checkAnswer(sql("SELECT * FROM t"), Seq(Row(9, "20260101")))
+
+        sql("INSERT OVERWRITE t SELECT * FROM t WHERE false")
+        checkAnswer(sql("SELECT * FROM t"), Seq.empty)
+      }
+    }
+  }
+
+  test("Format table: dynamic INSERT OVERWRITE replaces only the partitions it writes") {
+    withTable("t") {
+      withSQLConf("spark.sql.sources.partitionOverwriteMode" -> "DYNAMIC") {
+        sql("CREATE TABLE t (id INT, dt STRING) USING CSV PARTITIONED BY (dt)")
+        sql("INSERT INTO t VALUES (1, '20260101'), (2, '20260102')")
+
+        sql("INSERT OVERWRITE t VALUES (9, '20260101')")
+        checkAnswer(sql("SELECT * FROM t ORDER BY id"), Seq(Row(2, "20260102"), Row(9, "20260101")))
+
+        // Nothing written means no partition selected, which is not the same as selecting all.
+        sql("INSERT OVERWRITE t SELECT * FROM t WHERE false")
+        checkAnswer(sql("SELECT * FROM t ORDER BY id"), Seq(Row(2, "20260102"), Row(9, "20260101")))
+      }
     }
   }
 

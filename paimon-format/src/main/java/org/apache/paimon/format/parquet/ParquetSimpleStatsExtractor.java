@@ -42,7 +42,10 @@ import org.apache.parquet.column.statistics.FloatStatistics;
 import org.apache.parquet.column.statistics.IntStatistics;
 import org.apache.parquet.column.statistics.LongStatistics;
 import org.apache.parquet.column.statistics.Statistics;
+import org.apache.parquet.hadoop.metadata.ParquetMetadata;
 import org.apache.parquet.schema.PrimitiveType;
+
+import javax.annotation.Nullable;
 
 import java.io.IOException;
 import java.math.BigDecimal;
@@ -72,6 +75,29 @@ public class ParquetSimpleStatsExtractor implements SimpleStatsExtractor {
     @Override
     public SimpleColStats[] extract(FileIO fileIO, Path path, long length) throws IOException {
         return extractWithFileInfo(fileIO, path, length).getLeft();
+    }
+
+    @Override
+    public SimpleColStats[] extract(
+            FileIO fileIO, Path path, long length, @Nullable Object writerMetadata)
+            throws IOException {
+        if (writerMetadata instanceof ParquetMetadata) {
+            // Use in-memory metadata directly, avoiding re-reading the file.
+            // This is critical for object stores (OSS/S3) where the file may not be
+            // immediately visible after close.
+            Map<String, Statistics<?>> columnStats =
+                    ParquetUtil.extractColumnStats((ParquetMetadata) writerMetadata);
+            SimpleColStatsCollector[] collectors = SimpleColStatsCollector.create(statsCollectors);
+            return IntStream.range(0, rowType.getFieldCount())
+                    .mapToObj(
+                            i -> {
+                                DataField field = rowType.getFields().get(i);
+                                return toFieldStats(
+                                        field, columnStats.get(field.name()), collectors[i]);
+                            })
+                    .toArray(SimpleColStats[]::new);
+        }
+        return extract(fileIO, path, length);
     }
 
     @Override
@@ -115,6 +141,20 @@ public class ParquetSimpleStatsExtractor implements SimpleStatsExtractor {
                                 BinaryString.fromString(stringStats.minAsString()),
                                 BinaryString.fromString(stringStats.maxAsString()),
                                 nullCount);
+                break;
+            case BINARY:
+            case VARBINARY:
+                assertStatsClass(field, stats, BinaryStatistics.class);
+                BinaryStatistics binaryStats = (BinaryStatistics) stats;
+                fieldStats =
+                        new SimpleColStats(
+                                binaryStats.genericGetMin().getBytes(),
+                                binaryStats.genericGetMax().getBytes(),
+                                nullCount);
+                break;
+            case GEOMETRY:
+            case GEOGRAPHY:
+                fieldStats = new SimpleColStats(null, null, nullCount);
                 break;
             case BOOLEAN:
                 assertStatsClass(field, stats, BooleanStatistics.class);

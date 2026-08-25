@@ -112,8 +112,10 @@ public class ManifestEntryCache extends ObjectsCache<Path, ManifestEntry, Manife
     }
 
     @Override
-    protected List<ManifestEntry> readFromSegments(
-            ManifestEntrySegments manifestSegments, Filters<ManifestEntry> filters)
+    protected <R> List<R> readFromSegments(
+            ManifestEntrySegments manifestSegments,
+            Filters<ManifestEntry> filters,
+            Function<ManifestEntry, R> convertor)
             throws IOException {
         PartitionPredicate partitionFilter = null;
         BucketFilter bucketFilter = null;
@@ -125,10 +127,10 @@ public class ManifestEntryCache extends ObjectsCache<Path, ManifestEntry, Manife
         List<RichSegments> segments = manifestSegments.segments();
 
         // try to do fast filter first
-        Optional<BinaryRow> partition = extractSinglePartition(partitionFilter);
-        if (partition.isPresent()) {
+        Optional<BinaryRow> singlePartition = extractSinglePartition(partitionFilter);
+        if (singlePartition.isPresent()) {
             Map<Integer, List<RichSegments>> segMap =
-                    manifestSegments.indexedSegments().get(partition.get());
+                    manifestSegments.indexedSegments().get(singlePartition.get());
             if (segMap == null) {
                 return Collections.emptyList();
             }
@@ -147,23 +149,29 @@ public class ManifestEntryCache extends ObjectsCache<Path, ManifestEntry, Manife
         // do force loop filter
         List<Segments> segmentsList = new ArrayList<>();
         for (RichSegments richSegments : segments) {
-            if (partitionFilter != null && !partitionFilter.test(richSegments.partition())) {
+            BinaryRow partition = richSegments.partition();
+            if (partitionFilter != null && !partitionFilter.test(partition)) {
                 continue;
             }
             if (bucketFilter != null
-                    && !bucketFilter.test(richSegments.bucket(), richSegments.totalBucket())) {
+                    && !bucketFilter.test(
+                            partition, richSegments.bucket(), richSegments.totalBucket())) {
                 continue;
             }
             segmentsList.add(richSegments.segments());
         }
 
         // read manifest entries from segments with per record filter
-        List<ManifestEntry> result = new ArrayList<>();
+        List<R> result = new ArrayList<>();
         InternalRowSerializer formatSerializer = this.formatSerializer.get();
         for (Segments subSegments : segmentsList) {
             result.addAll(
                     SimpleObjectsCache.readFromSegments(
-                            formatSerializer, projectedSerializer, subSegments, filters));
+                            formatSerializer,
+                            projectedSerializer,
+                            subSegments,
+                            filters,
+                            convertor));
         }
         return result;
     }

@@ -19,7 +19,9 @@
 package org.apache.paimon.spark
 
 import org.apache.paimon.CoreOptions
-import org.apache.paimon.table.{FileStoreTable, Table}
+import org.apache.paimon.partition.PartitionStatistics
+import org.apache.paimon.table.{FileStoreTable, FormatTable, Table}
+import org.apache.paimon.table.source.ScanMode
 import org.apache.paimon.types.RowType
 import org.apache.paimon.utils.{InternalRowPartitionComputer, TypeUtils}
 
@@ -44,47 +46,52 @@ trait PaimonPartitionManagement extends SupportsAtomicPartitionManagement with L
 
   private def toPaimonPartitions(rows: Array[InternalRow]): Array[java.util.Map[String, String]] = {
     table match {
-      case fileStoreTable: FileStoreTable =>
+      case _: FileStoreTable =>
         val partitionKeys = table.partitionKeys().asScala.toSeq
-        val partitionDefaultName = fileStoreTable.coreOptions().partitionDefaultName()
-        val legacyPartitionName = CoreOptions.fromMap(table.options()).legacyPartitionName
-
         rows.map {
           r =>
-            val partitionFieldCount = r.numFields
             require(
-              partitionFieldCount <= partitionKeys.length,
-              s"Partition values length $partitionFieldCount exceeds partition keys " +
+              r.numFields <= partitionKeys.length,
+              s"Partition values length ${r.numFields} exceeds partition keys " +
                 s"${partitionKeys.mkString("[", ", ", "]")}."
             )
-            val partitionNames = partitionKeys.take(partitionFieldCount)
-            val currentPartitionRowType =
-              if (partitionFieldCount == partitionRowType.getFieldCount) {
-                partitionRowType
-              } else {
-                TypeUtils.project(table.rowType, partitionNames.asJava)
-              }
-            val currentPartitionSchema =
-              if (partitionFieldCount == partitionSchema.length) {
-                partitionSchema
-              } else {
-                SparkTypeUtils.fromPaimonRowType(currentPartitionRowType)
-              }
-            val rowConverter = CatalystTypeConverters.createToScalaConverter(
-              CharVarcharUtils.replaceCharVarcharWithString(currentPartitionSchema))
-            val rowDataPartitionComputer = new InternalRowPartitionComputer(
-              partitionDefaultName,
-              currentPartitionRowType,
-              partitionNames.toArray,
-              legacyPartitionName
-            )
-
-            rowDataPartitionComputer.generatePartValues(
-              new SparkRow(currentPartitionRowType, rowConverter(r).asInstanceOf[Row]))
+            toPaimonPartition(r, partitionKeys.take(r.numFields))
         }
+      case _: FormatTable =>
+        // Reached by the partition operations this trait still serves directly. Saying that only
+        // a FileStoreTable has partitions would be wrong for a Format Table with catalog-managed
+        // partitions, which has them and lists them here; a Format Table is still a Paimon table,
+        // just not a native one.
+        throw new UnsupportedOperationException(
+          s"This partition operation is supported only for a native Paimon table; " +
+            s"${table.name()} is a Format Table, which manages its partitions through " +
+            s"ADD PARTITION, DROP PARTITION and MSCK REPAIR TABLE.")
       case _ =>
-        throw new UnsupportedOperationException("Only FileStoreTable supports partitions.")
+        throw new UnsupportedOperationException(
+          s"This partition operation is supported only for a native Paimon table, " +
+            s"which ${table.name()} is not.")
     }
+  }
+
+  protected def toPaimonPartition(
+      row: InternalRow,
+      partitionNames: Seq[String]): java.util.Map[String, String] = {
+    val coreOptions = CoreOptions.fromMap(table.options())
+    val partitionDefaultName = coreOptions.partitionDefaultName()
+    val legacyPartitionName = coreOptions.legacyPartitionName
+    val currentPartitionRowType = TypeUtils.project(table.rowType, partitionNames.asJava)
+    val currentPartitionSchema = SparkTypeUtils.fromPaimonRowType(currentPartitionRowType)
+    val rowConverter = CatalystTypeConverters.createToScalaConverter(
+      CharVarcharUtils.replaceCharVarcharWithString(currentPartitionSchema))
+    val rowDataPartitionComputer = new InternalRowPartitionComputer(
+      partitionDefaultName,
+      currentPartitionRowType,
+      partitionNames.toArray,
+      legacyPartitionName
+    )
+
+    rowDataPartitionComputer.generatePartValues(
+      new SparkRow(currentPartitionRowType, rowConverter(row).asInstanceOf[Row]))
   }
 
   override def dropPartitions(rows: Array[InternalRow]): Boolean = {
@@ -136,7 +143,31 @@ trait PaimonPartitionManagement extends SupportsAtomicPartitionManagement with L
   }
 
   override def loadPartitionMetadata(ident: InternalRow): JMap[String, String] = {
-    Map.empty[String, String].asJava
+    table match {
+      case fileStoreTable: FileStoreTable =>
+        val partitionSpec = toPaimonPartitions(Array(ident)).head
+        val partitionEntries = fileStoreTable
+          .newSnapshotReader()
+          .withMode(ScanMode.ALL)
+          .withPartitionFilter(partitionSpec)
+          .partitionEntries()
+
+        if (!partitionEntries.isEmpty) {
+          val entry = partitionEntries.get(0)
+          Map(
+            PartitionStatistics.FIELD_RECORD_COUNT -> entry.recordCount().toString,
+            PartitionStatistics.FIELD_FILE_SIZE_IN_BYTES -> entry.fileSizeInBytes().toString,
+            PartitionStatistics.FIELD_FILE_COUNT -> entry.fileCount().toString,
+            PartitionStatistics.FIELD_LAST_FILE_CREATION_TIME -> entry
+              .lastFileCreationTime()
+              .toString
+          ).asJava
+        } else {
+          Map.empty[String, String].asJava
+        }
+      case _ =>
+        Map.empty[String, String].asJava
+    }
   }
 
   override def listPartitionIdentifiers(

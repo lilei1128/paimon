@@ -37,6 +37,7 @@ import org.apache.paimon.flink.utils.InternalTypeInfo;
 import org.apache.paimon.manifest.ManifestCommittable;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.SpecialFields;
+import org.apache.paimon.types.BlobType;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.DataTypeCasts;
@@ -45,10 +46,13 @@ import org.apache.paimon.types.DataTypeRoot;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.Preconditions;
 
+import org.apache.flink.api.common.functions.OpenContext;
+import org.apache.flink.api.common.functions.RichMapFunction;
 import org.apache.flink.api.common.typeinfo.BasicTypeInfo;
 import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.java.typeutils.TupleTypeInfo;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.functions.sink.v2.DiscardingSink;
 import org.apache.flink.streaming.api.operators.StreamFlatMap;
@@ -61,6 +65,7 @@ import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.conversion.DataStructureConverter;
 import org.apache.flink.table.data.conversion.DataStructureConverters;
 import org.apache.flink.table.types.logical.LogicalTypeRoot;
+import org.apache.flink.types.Row;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -126,6 +131,9 @@ public class DataEvolutionMergeIntoAction extends TableActionBase {
 
     private int sinkParallelism;
 
+    // the snapshot id this action based on
+    private long baseSnapshotId;
+
     public DataEvolutionMergeIntoAction(
             String databaseName, String tableName, Map<String, String> catalogConfig) {
         super(databaseName, tableName, catalogConfig);
@@ -142,6 +150,7 @@ public class DataEvolutionMergeIntoAction extends TableActionBase {
             throw new UnsupportedOperationException(
                     "merge-into action doesn't support updating an empty table.");
         }
+        this.baseSnapshotId = latestSnapshotId;
         table =
                 table.copy(
                         Collections.singletonMap(
@@ -234,6 +243,14 @@ public class DataEvolutionMergeIntoAction extends TableActionBase {
     }
 
     public Tuple2<DataStream<RowData>, RowType> buildSource() {
+        if (targetTableName().equals(sourceTableName())) {
+            throw new RuntimeException(
+                    String.format(
+                            "Source table '%s' and target table '%s' are the same, not permitted now."
+                                    + "Please lookup docs for how to merge on self.",
+                            sourceTableName(), targetTableName()));
+        }
+
         // handle sqls
         handleSqls();
 
@@ -291,11 +308,13 @@ public class DataEvolutionMergeIntoAction extends TableActionBase {
             // _ROW_ID is the first field of joined table.
             query =
                     String.format(
-                            "SELECT %s, %s FROM %s INNER JOIN %s AS RT ON %s",
+                            "SELECT %s, %s FROM %s INNER JOIN %s "
+                                    + "/*+ OPTIONS('%s'='full') */ AS RT ON %s",
                             "`RT`.`_ROW_ID` as `_ROW_ID`",
                             String.join(",", project),
                             escapedSourceName(),
                             escapedRowTrackingTargetName(),
+                            CoreOptions.SCALAR_INDEX_SEARCH_MODE.key(),
                             rewriteMergeCondition(mergeCondition));
         }
 
@@ -316,7 +335,7 @@ public class DataEvolutionMergeIntoAction extends TableActionBase {
         Transformation<RowData> sourceTransformation = source.getTransformation();
         List<Long> firstRowIds =
                 ((FileStoreTable) table)
-                        .store().newScan()
+                        .store().newScan().withSnapshot(baseSnapshotId)
                                 .withManifestEntryFilter(
                                         entry ->
                                                 entry.file().firstRowId() != null
@@ -369,21 +388,23 @@ public class DataEvolutionMergeIntoAction extends TableActionBase {
                                         coreOptions.localSortMaxNumFileHandles(),
                                         coreOptions.spillCompressOptions(),
                                         sinkParallelism,
-                                        coreOptions.writeBufferSpillDiskSize(),
-                                        coreOptions.sequenceFieldSortOrderIsAscending()))
+                                        coreOptions.writeBufferSpillDiskSize()))
                         .setParallelism(sinkParallelism);
 
         // 2. write partial columns
         return sorted.transform(
                         "PARTIAL WRITE COLUMNS",
                         new CommittableTypeInfo(),
-                        new DataEvolutionPartialWriteOperator((FileStoreTable) table, rowType))
+                        new DataEvolutionPartialWriteOperator(
+                                (FileStoreTable) table, rowType, baseSnapshotId))
                 .setParallelism(sinkParallelism);
     }
 
     public DataStream<Committable> commit(
             DataStream<Committable> written, Set<String> updatedColumns) {
         FileStoreTable storeTable = (FileStoreTable) table;
+        // copy to avoid serialization issue
+        long baseSnapshotId = this.baseSnapshotId;
 
         // Check if some global-indexed columns are updated
         DataStream<Committable> checked =
@@ -402,7 +423,9 @@ public class DataEvolutionMergeIntoAction extends TableActionBase {
                         context ->
                                 new StoreCommitter(
                                         storeTable,
-                                        storeTable.newCommit(context.commitUser()),
+                                        storeTable
+                                                .newCommit(context.commitUser())
+                                                .rowIdCheckConflict(baseSnapshotId),
                                         context),
                         new NoopCommittableStateManager());
 
@@ -421,14 +444,36 @@ public class DataEvolutionMergeIntoAction extends TableActionBase {
         return batchTEnv
                 .toDataStream(source)
                 .map(
-                        row -> {
-                            int arity = row.getArity();
-                            GenericRowData rowData = new GenericRowData(row.getKind(), arity);
-                            for (int i = 0; i < arity; i++) {
-                                rowData.setField(
-                                        i, converters.get(i).toInternalOrNull(row.getField(i)));
+                        new RichMapFunction<Row, RowData>() {
+
+                            /**
+                             * Do not annotate with <code>@override</code> here to maintain
+                             * compatibility with Flink 1.18-.
+                             */
+                            public void open(OpenContext openContext) {
+                                open(new Configuration());
                             }
-                            return rowData;
+
+                            /**
+                             * Do not annotate with <code>@override</code> here to maintain
+                             * compatibility with Flink 2.0+.
+                             */
+                            public void open(Configuration parameters) {
+                                ClassLoader classLoader =
+                                        getRuntimeContext().getUserCodeClassLoader();
+                                converters.forEach(converter -> converter.open(classLoader));
+                            }
+
+                            @Override
+                            public RowData map(Row row) {
+                                int arity = row.getArity();
+                                GenericRowData rowData = new GenericRowData(row.getKind(), arity);
+                                for (int i = 0; i < arity; i++) {
+                                    rowData.setField(
+                                            i, converters.get(i).toInternalOrNull(row.getField(i)));
+                                }
+                                return rowData;
+                            }
                         });
     }
 
@@ -483,16 +528,16 @@ public class DataEvolutionMergeIntoAction extends TableActionBase {
                     throw new IllegalStateException(
                             "Column not found in target table: " + flinkColumn.getName());
                 }
-                if (targetField.type().getTypeRoot() == DataTypeRoot.BLOB
+                if (BlobType.isBlobFileField(targetField.type())
                         && !updatableBlobFields.contains(flinkColumn.getName())) {
                     throw new IllegalStateException(
-                            "Should not append/update raw-data BLOB column '"
+                            "Should not append/update raw-data BLOB, ARRAY<BLOB> or MAP<X, BLOB> column '"
                                     + flinkColumn.getName()
                                     + "' through MERGE INTO. "
                                     + "Only descriptor-based BLOB columns (configured via '"
                                     + CoreOptions.BLOB_DESCRIPTOR_FIELD.key()
                                     + "' or '"
-                                    + CoreOptions.BLOB_EXTERNAL_STORAGE_FIELD.key()
+                                    + CoreOptions.BLOB_VIEW_FIELD.key()
                                     + "') can be updated.");
                 }
 

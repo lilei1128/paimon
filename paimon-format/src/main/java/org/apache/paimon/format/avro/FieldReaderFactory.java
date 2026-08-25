@@ -19,8 +19,8 @@
 package org.apache.paimon.format.avro;
 
 import org.apache.paimon.data.BinaryString;
+import org.apache.paimon.data.BinaryVector;
 import org.apache.paimon.data.Blob;
-import org.apache.paimon.data.BlobDescriptor;
 import org.apache.paimon.data.Decimal;
 import org.apache.paimon.data.GenericArray;
 import org.apache.paimon.data.GenericMap;
@@ -76,9 +76,15 @@ public class FieldReaderFactory implements AvroSchemaVisitor<FieldReader> {
 
     private static final FieldReader INT_READER = new IntReader();
 
+    private static final FieldReader INT_TO_BIGINT_READER = new IntToBigIntReader();
+
+    private static final FieldReader INT_TO_DOUBLE_READER = new IntToDoubleReader();
+
     private static final FieldReader BIGINT_READER = new BigIntReader();
 
     private static final FieldReader FLOAT_READER = new FloatReader();
+
+    private static final FieldReader FLOAT_TO_DOUBLE_READER = new FloatToDoubleReader();
 
     private static final FieldReader DOUBLE_READER = new DoubleReader();
 
@@ -91,7 +97,21 @@ public class FieldReaderFactory implements AvroSchemaVisitor<FieldReader> {
         if (primitive.getType() == Schema.Type.BYTES
                 && type != null
                 && type.getTypeRoot() == DataTypeRoot.BLOB) {
-            return new BlobDescriptorBytesReader(uriReader);
+            return new BlobBytesReader(uriReader);
+        }
+        if (type != null && primitive.getLogicalType() == null) {
+            if (primitive.getType() == Schema.Type.INT) {
+                if (type.getTypeRoot() == DataTypeRoot.BIGINT) {
+                    return INT_TO_BIGINT_READER;
+                }
+                if (type.getTypeRoot() == DataTypeRoot.DOUBLE) {
+                    return INT_TO_DOUBLE_READER;
+                }
+            }
+            if (primitive.getType() == Schema.Type.FLOAT
+                    && type.getTypeRoot() == DataTypeRoot.DOUBLE) {
+                return FLOAT_TO_DOUBLE_READER;
+            }
         }
         return AvroSchemaVisitor.super.primitive(primitive, type);
     }
@@ -165,6 +185,12 @@ public class FieldReaderFactory implements AvroSchemaVisitor<FieldReader> {
     public FieldReader visitArray(Schema schema, @Nullable DataType elementType) {
         FieldReader elementReader = visit(schema.getElementType(), elementType);
         return new ArrayReader(elementReader);
+    }
+
+    @Override
+    public FieldReader visitArrayVector(Schema schema, @Nullable DataType elementType) {
+        FieldReader elementReader = visit(schema.getElementType(), elementType);
+        return new ArrayVectorReader(elementReader, elementType);
     }
 
     @Override
@@ -253,14 +279,14 @@ public class FieldReaderFactory implements AvroSchemaVisitor<FieldReader> {
         }
     }
 
-    private static class BlobDescriptorBytesReader implements FieldReader {
+    private static class BlobBytesReader implements FieldReader {
 
         private final UriReader uriReader;
 
-        private BlobDescriptorBytesReader(UriReader uriReader) {
+        private BlobBytesReader(UriReader uriReader) {
             if (uriReader == null) {
                 throw new IllegalArgumentException(
-                        "UriReader must not be null for BlobDescriptorBytesReader.");
+                        "UriReader must not be null for BlobBytesReader.");
             }
             this.uriReader = uriReader;
         }
@@ -268,8 +294,7 @@ public class FieldReaderFactory implements AvroSchemaVisitor<FieldReader> {
         @Override
         public Object read(Decoder decoder, Object reuse) throws IOException {
             byte[] bytes = decoder.readBytes(null).array();
-            BlobDescriptor blobDescriptor = BlobDescriptor.deserialize(bytes);
-            return Blob.fromDescriptor(uriReader, blobDescriptor);
+            return Blob.fromBytesWithReader(bytes, uriReader, null, false);
         }
 
         @Override
@@ -330,6 +355,22 @@ public class FieldReaderFactory implements AvroSchemaVisitor<FieldReader> {
         }
     }
 
+    private static class IntToBigIntReader extends IntReader {
+
+        @Override
+        public Object read(Decoder decoder, Object reuse) throws IOException {
+            return (long) decoder.readInt();
+        }
+    }
+
+    private static class IntToDoubleReader extends IntReader {
+
+        @Override
+        public Object read(Decoder decoder, Object reuse) throws IOException {
+            return (double) decoder.readInt();
+        }
+    }
+
     private static class BigIntReader implements FieldReader {
 
         @Override
@@ -353,6 +394,14 @@ public class FieldReaderFactory implements AvroSchemaVisitor<FieldReader> {
         @Override
         public void skip(Decoder decoder) throws IOException {
             decoder.readFloat();
+        }
+    }
+
+    private static class FloatToDoubleReader extends FloatReader {
+
+        @Override
+        public Object read(Decoder decoder, Object reuse) throws IOException {
+            return (double) decoder.readFloat();
         }
     }
 
@@ -458,6 +507,22 @@ public class FieldReaderFactory implements AvroSchemaVisitor<FieldReader> {
 
                 chunkLength = decoder.arrayNext();
             }
+        }
+    }
+
+    private static class ArrayVectorReader extends ArrayReader {
+
+        private final DataType elementType;
+
+        private ArrayVectorReader(FieldReader elementReader, DataType elementType) {
+            super(elementReader);
+            this.elementType = elementType;
+        }
+
+        @Override
+        public Object read(Decoder decoder, Object reuse) throws IOException {
+            GenericArray array = (GenericArray) super.read(decoder, reuse);
+            return BinaryVector.fromInternalArray(array, elementType);
         }
     }
 
@@ -641,17 +706,21 @@ public class FieldReaderFactory implements AvroSchemaVisitor<FieldReader> {
                 row = new GenericRow(mapping.length);
             }
 
-            Object[] values = new Object[fieldReaders.length];
             for (int i = 0; i < fieldReaders.length; i += 1) {
-                if (mappingBack[i] >= 0) {
-                    values[i] = fieldReaders[i].read(decoder, row.getField(mappingBack[i]));
+                int outputPosition = mappingBack[i];
+                if (outputPosition >= 0) {
+                    row.setField(
+                            outputPosition,
+                            fieldReaders[i].read(decoder, row.getField(outputPosition)));
                 } else {
                     fieldReaders[i].skip(decoder);
                 }
             }
 
             for (int i = 0; i < mapping.length; i++) {
-                row.setField(i, mapping[i] >= 0 ? values[mapping[i]] : null);
+                if (mapping[i] < 0) {
+                    row.setField(i, null);
+                }
             }
 
             return row;

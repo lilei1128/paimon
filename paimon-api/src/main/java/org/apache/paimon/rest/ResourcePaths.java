@@ -98,6 +98,17 @@ public class ResourcePaths {
         return SLASH.join(V1, prefix, TABLES, "rename");
     }
 
+    public String replaceTable(String databaseName, String objectName) {
+        return SLASH.join(
+                V1,
+                prefix,
+                DATABASES,
+                encodeString(databaseName),
+                TABLES,
+                encodeString(objectName),
+                "replace");
+    }
+
     public String commitTable(String databaseName, String objectName) {
         return SLASH.join(
                 V1,
@@ -118,6 +129,17 @@ public class ResourcePaths {
                 TABLES,
                 encodeString(objectName),
                 ROLLBACK);
+    }
+
+    public String rollbackSchemaTable(String databaseName, String objectName) {
+        return SLASH.join(
+                V1,
+                prefix,
+                DATABASES,
+                encodeString(databaseName),
+                TABLES,
+                encodeString(objectName),
+                "rollback-schema");
     }
 
     public String registerTable(String databaseName) {
@@ -191,6 +213,18 @@ public class ResourcePaths {
                 PARTITIONS);
     }
 
+    public String dropPartitions(String databaseName, String objectName) {
+        return SLASH.join(
+                V1,
+                prefix,
+                DATABASES,
+                encodeString(databaseName),
+                TABLES,
+                encodeString(objectName),
+                PARTITIONS,
+                "drop");
+    }
+
     public String markDonePartitions(String databaseName, String objectName) {
         return SLASH.join(
                 V1,
@@ -213,6 +247,18 @@ public class ResourcePaths {
                 encodeString(objectName),
                 PARTITIONS,
                 "list-by-names");
+    }
+
+    public String listPartitionsByFilter(String databaseName, String objectName) {
+        return SLASH.join(
+                V1,
+                prefix,
+                DATABASES,
+                encodeString(databaseName),
+                TABLES,
+                encodeString(objectName),
+                PARTITIONS,
+                "list-by-filter");
     }
 
     public String branches(String databaseName, String objectName) {

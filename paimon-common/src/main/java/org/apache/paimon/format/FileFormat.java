@@ -107,7 +107,16 @@ public abstract class FileFormat {
         return FileFormat.fromIdentifier(options.fileFormatString(), options.toConfiguration());
     }
 
+    @Nullable
+    public static FileFormat vectorFileFormat(CoreOptions options) {
+        String vectorFileFormat = options.vectorFileFormatString();
+        if (vectorFileFormat == null) {
+            return null;
+        }
+        return FileFormat.fromIdentifier(vectorFileFormat, options.toConfiguration());
+    }
+
     public static FileFormat manifestFormat(CoreOptions options) {
-        return FileFormat.fromIdentifier(options.manifestFormatString(), options.toConfiguration());
+        return FileFormat.fromIdentifier(CoreOptions.FILE_FORMAT_AVRO, options.toConfiguration());
     }
 }

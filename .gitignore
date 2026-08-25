@@ -29,7 +29,6 @@ dependency-reduced-pom.xml
 metastore_db/
 *.class
 *.jar
-!**/resources/**/*.jar
 *.log
 .java-version
 .version.properties
@@ -39,7 +38,16 @@ metastore_db/
 paimon-python/dist/
 paimon-python/*.egg-info/
 paimon-python/dev/log
+paimon-spark/paimon-spark-ut/PaimonLambdaFunctionfunction_test.java
 
 ### Misc ###
 *.swp
 .cache
+
+### Rust ###
+Cargo.lock
+### Vortex lib ###
+*libvortex_jni*
+### Full-text lib ###
+*libpaimon_ftindex_jni*
+*libpaimon_ftindex_ffi*

@@ -1,26 +1,27 @@
-"""
-Licensed to the Apache Software Foundation (ASF) under one
-or more contributor license agreements.  See the NOTICE file
-distributed with this work for additional information
-regarding copyright ownership.  The ASF licenses this file
-to you under the Apache License, Version 2.0 (the
-"License"); you may not use this file except in compliance
-with the License.  You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
 import unittest
 from parameterized import parameterized
 import pyarrow as pa
 
 from pypaimon.schema.data_types import (DataField, AtomicType, ArrayType, MultisetType, MapType,
-                                        RowType, PyarrowFieldParser)
+                                        RowType, VectorType, PyarrowFieldParser,
+                                        is_blob_file_type)
 
 
 class DataTypesTest(unittest.TestCase):
@@ -42,6 +43,23 @@ class DataTypesTest(unittest.TestCase):
         self.assertEqual(str(AtomicType("INT")),
                          str(AtomicType.from_dict(AtomicType("INT").to_dict())))
 
+    def test_parameterized_atomic_type_not_null_roundtrip(self):
+        # ``to_dict`` appends " NOT NULL" to the type string; the parser must
+        # strip it back into ``nullable`` instead of keeping it inside
+        # ``AtomicType.type``. Parameterized types take the paren branch where
+        # this used to be missed, so a re-serialize doubled the suffix and
+        # ``from_paimon_type`` blew up with "... NOT NULL NOT NULL".
+        for type_str in ("DECIMAL(12, 2)", "VARCHAR(10)", "CHAR(5)",
+                         "TIMESTAMP(3)", "TIME(0)", "BINARY(12)"):
+            original = AtomicType(type_str, nullable=False)
+            parsed = AtomicType.from_dict(original.to_dict())
+            self.assertEqual(parsed.type, type_str, type_str)
+            self.assertFalse(parsed.nullable, type_str)
+            self.assertEqual(parsed, original, type_str)
+            # Round-trips stably and stays materializable as a PyArrow type.
+            self.assertEqual(parsed.to_dict(), original.to_dict(), type_str)
+            PyarrowFieldParser.from_paimon_type(parsed)
+
     @parameterized.expand([
         (ArrayType, AtomicType("TIMESTAMP(6)"), "ARRAY<TIMESTAMP(6)>", "ARRAY<ARRAY<TIMESTAMP(6)>>"),
         (MultisetType, AtomicType("TIMESTAMP(6)"), "MULTISET<TIMESTAMP(6)>", "MULTISET<MULTISET<TIMESTAMP(6)>>")
@@ -55,9 +73,87 @@ class DataTypesTest(unittest.TestCase):
         self.assertEqual(str(data_type_class(True, element_type)),
                          str(data_type_class.from_dict(data_type_class(True, element_type).to_dict())))
 
+    def test_array_element_nullability_roundtrip(self):
+        for element_nullable in (True, False):
+            paimon_type = ArrayType(
+                True,
+                AtomicType("BLOB", nullable=element_nullable),
+            )
+
+            arrow_type = PyarrowFieldParser.from_paimon_type(paimon_type)
+
+            self.assertEqual(arrow_type.value_field.nullable, element_nullable)
+            self.assertEqual(
+                PyarrowFieldParser.to_paimon_type(arrow_type, nullable=True),
+                paimon_type,
+            )
+
     def test_map_type(self):
         self.assertEqual(str(MapType(True, AtomicType("STRING"), AtomicType("TIMESTAMP(6)"))),
                          "MAP<STRING, TIMESTAMP(6)>")
+
+    def test_map_nullability_dict_roundtrip(self):
+        for map_nullable in (True, False):
+            for value_nullable in (True, False):
+                original = MapType(
+                    map_nullable,
+                    AtomicType("STRING", nullable=False),
+                    AtomicType("INT", nullable=value_nullable),
+                )
+
+                self.assertEqual(MapType.from_dict(original.to_dict()), original)
+
+        legacy = MapType(
+            True,
+            AtomicType("STRING", nullable=False),
+            AtomicType("INT"),
+        ).to_dict()
+        legacy.pop("nullable")
+        self.assertTrue(MapType.from_dict(legacy).nullable)
+
+    def test_map_blob_value_nullability_roundtrip(self):
+        for value_nullable in (True, False):
+            paimon_type = MapType(
+                True,
+                AtomicType("STRING", nullable=False),
+                AtomicType("BLOB", nullable=value_nullable),
+            )
+
+            arrow_type = PyarrowFieldParser.from_paimon_type(paimon_type)
+
+            self.assertFalse(arrow_type.key_field.nullable)
+            self.assertEqual(arrow_type.item_field.nullable, value_nullable)
+            self.assertEqual(
+                PyarrowFieldParser.to_paimon_type(arrow_type, nullable=True),
+                paimon_type,
+            )
+            self.assertTrue(is_blob_file_type(paimon_type))
+
+    def test_vector_type(self):
+        vector_type = VectorType(True, AtomicType("FLOAT"), 3)
+        self.assertEqual(str(vector_type), "VECTOR<FLOAT, 3>")
+        self.assertEqual(
+            vector_type.to_dict(),
+            {
+                "type": "VECTOR",
+                "element": "FLOAT",
+                "length": 3,
+                "nullable": True
+            }
+        )
+        self.assertEqual(vector_type, VectorType.from_dict(vector_type.to_dict()))
+        self.assertEqual(hash(vector_type), hash(VectorType(True, AtomicType("FLOAT"), 3)))
+
+        not_null_vector = VectorType(False, AtomicType("FLOAT", nullable=False), 3)
+        self.assertEqual(str(not_null_vector), "VECTOR<FLOAT NOT NULL, 3> NOT NULL")
+        self.assertEqual(not_null_vector, VectorType.from_dict(not_null_vector.to_dict()))
+
+        with self.assertRaises(ValueError):
+            VectorType(True, AtomicType("FLOAT"), 0)
+        with self.assertRaises(ValueError):
+            VectorType(True, AtomicType("STRING"), 3)
+        with self.assertRaises(ValueError):
+            VectorType(True, ArrayType(True, AtomicType("INT")), 3)
 
     def test_row_type(self):
         self.assertEqual(str(RowType(True, [DataField(0, "a", AtomicType("STRING"), "Someone's desc."),
@@ -134,6 +230,20 @@ class DataTypesTest(unittest.TestCase):
         self.assertEqual(len(converted_nested_field.fields), 2)
         self.assertEqual(converted_nested_field.fields[0].name, "inner_field1")
         self.assertEqual(converted_nested_field.fields[1].name, "inner_field2")
+
+    def test_vector_pyarrow_roundtrip(self):
+        paimon_vector = VectorType(True, AtomicType("FLOAT"), 3)
+        pa_type = PyarrowFieldParser.from_paimon_type(paimon_vector)
+
+        self.assertTrue(pa.types.is_fixed_size_list(pa_type))
+        self.assertEqual(pa_type.list_size, 3)
+        self.assertTrue(pa.types.is_float32(pa_type.value_type))
+
+        converted_paimon_vector = PyarrowFieldParser.to_paimon_type(pa_type, nullable=True)
+        self.assertEqual(converted_paimon_vector, paimon_vector)
+
+        avro_type = PyarrowFieldParser.to_avro_type(pa_type, "embedding")
+        self.assertEqual(avro_type, {"type": "array", "items": "float"})
 
     def test_time_type(self):
         pa_type = PyarrowFieldParser.from_paimon_type(AtomicType("TIME"))
